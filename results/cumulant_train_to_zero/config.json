@@ -1,0 +1,48 @@
+{
+  "input_dim": 64,
+  "output_dim": 1,
+  "hidden_depth": 3,
+  "widths": [
+    64,
+    128,
+    256,
+    512
+  ],
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "activation": "relu",
+  "bias": true,
+  "mc_samples": 64000,
+  "mc_batch_size": 8192,
+  "train_steps": 5000,
+  "batch_size": 1024,
+  "lr": 0.001,
+  "weight_decay": 0.0,
+  "loss_tol": 0.0,
+  "k_max": 3,
+  "kind": "simple",
+  "use_avg_metric": false,
+  "factor": true,
+  "device": "cpu",
+  "outdir": "results/cumulant_train_to_zero",
+  "skip_training": false,
+  "no_plots": false,
+  "no_sanity": false,
+  "debug": false,
+  "cumulant_config": {
+    "k_max": 3,
+    "kind": "simple",
+    "use_avg_metric": false,
+    "factor": true,
+    "use_pK": true,
+    "output_d_max": 1
+  },
+  "cumulant_config_summary": "k_max=3,kind=simple,use_avg_metric=False,factor=True,use_pK=True,output_d_max=1",
+  "dtype": "float64",
+  "input_distribution": "X ~ N(0, I_input_dim)"
+}
