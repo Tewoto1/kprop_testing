@@ -89,17 +89,22 @@ def default_cumulant_config() -> dict:
         "factor": True,        # factorized top cumulant; needed for k_max=3 feasibility
         "use_pK": True,        # power-cumulant path (the real algorithm; False is an ablation)
         "output_d_max": 1,     # we only need the mean (degree-1 cumulant) -> huge FLOP savings
-        "exact_relu_k2": False,  # "true"/exact closed-form ReLU at k_max==2 (see below)
+        "exact_relu_k2": False,  # leading-order closed-form ReLU at k_max==2 (see below)
+        "exact_relu_cov": False, # EXACT bivariate Gaussian ReLU covariance at k_max==2 (see below)
     }
 
 
-# Two runnable versions of the activation step at k_max==2 with ReLU, on the SAME
-# code/model (no fork, no copy):
-#   - exact_relu_k2=False (default): the general harmonic "cumulant PROPAGATION"
-#     algorithm (an approximation).
-#   - exact_relu_k2=True: the exact closed-form scalar Gaussian-ReLU
-#     mean/covariance update ("TRUE cumulant propagation", the actual computation;
-#     see src.mlp_kprop.relu_k2_exact). Only engages for ReLU AND k_max==2.
+# Selectable ReLU K=2 activation steps, all on the SAME code/model (no fork, no
+# copy). They only engage for ReLU AND k_max==2 (K>=3 is never affected):
+#   - exact_relu_cov=False, exact_relu_k2=False (default): the general harmonic
+#     "cumulant PROPAGATION" algorithm.
+#   - exact_relu_k2=True: exact closed-form marginals, but the off-diagonal uses
+#     the leading-order Hermite gain Sigma_ij*c_i*c_j (src.mlp_kprop.relu_k2_exact).
+#   - exact_relu_cov=True: the EXACT bivariate Gaussian ReLU covariance -- the
+#     off-diagonal is the true Cov(ReLU(Z_i), ReLU(Z_j)), no gain approximation
+#     (src.mlp_kprop.exact_relu_covariance; depends on scipy, non-autograd). Takes
+#     precedence over exact_relu_k2. This is the "exact_relu_covariance" /
+#     "k2_exact_bivariate_relu" / "exact_gaussian_relu_k2" path.
 
 
 def _normalize_config(cumulant_config: Optional[dict]) -> dict:
@@ -123,9 +128,10 @@ def _normalize_config(cumulant_config: Optional[dict]) -> dict:
     # The exact closed-form ReLU path only engages for ReLU at k_max==2; warn if
     # requested with a different k_max so the user isn't silently running the
     # approximate path.
-    if cfg.get("exact_relu_k2") and cfg["k_max"] != 2:
-        logger.warning("exact_relu_k2=True only takes effect at k_max==2 (got k_max=%d); "
-                       "the general (approximate) propagation path will run instead.", cfg["k_max"])
+    if (cfg.get("exact_relu_k2") or cfg.get("exact_relu_cov")) and cfg["k_max"] != 2:
+        flag = "exact_relu_cov" if cfg.get("exact_relu_cov") else "exact_relu_k2"
+        logger.warning("%s=True only takes effect at k_max==2 (got k_max=%d); "
+                       "the general (approximate) propagation path will run instead.", flag, cfg["k_max"])
     return cfg
 
 
@@ -135,7 +141,8 @@ def config_summary(cumulant_config: dict) -> str:
     return (
         f"k_max={cfg['k_max']},kind={kind},use_avg_metric={cfg['use_avg_metric']},"
         f"factor={cfg['factor']},use_pK={cfg['use_pK']},output_d_max={cfg['output_d_max']},"
-        f"exact_relu_k2={cfg.get('exact_relu_k2', False)}"
+        f"exact_relu_k2={cfg.get('exact_relu_k2', False)},"
+        f"exact_relu_cov={cfg.get('exact_relu_cov', False)}"
     )
 
 
@@ -242,6 +249,7 @@ def run_cumulant_propagation_from_model(
         use_pK=cfg["use_pK"],
         output_d_max=cfg["output_d_max"],
         exact_relu_k2=cfg.get("exact_relu_k2", False),
+        exact_relu_cov=cfg.get("exact_relu_cov", False),
     )
 
     # --- 4. Extract the predicted output mean (degree-1 cumulant = mean) ------

@@ -169,9 +169,13 @@ def main():
     p.add_argument("--no-factor", dest="factor", action="store_false")
     p.set_defaults(factor=True)
     p.add_argument("--exact-relu-k2", action="store_true",
-                   help="use the exact closed-form ('true') ReLU mean/covariance update at "
-                        "k_max==2 instead of the approximate harmonic propagation "
+                   help="use the closed-form ReLU mean/covariance update at k_max==2 with the "
+                        "leading-order off-diagonal gain Sigma_ij*c_i*c_j "
                         "(only takes effect with --k-max 2 and a ReLU activation)")
+    p.add_argument("--exact-relu-cov", action="store_true",
+                   help="use the EXACT bivariate-Gaussian ReLU covariance at k_max==2 "
+                        "(true Cov(ReLU(Z_i),ReLU(Z_j)), no gain approximation; needs scipy). "
+                        "Takes precedence over --exact-relu-k2. Only with --k-max 2 and ReLU")
 
     p.add_argument("--device", type=str, default=("cuda" if torch.cuda.is_available() else "cpu"))
     p.add_argument("--outdir", type=str, default="results/cumulant_train_to_zero")
@@ -203,6 +207,7 @@ def main():
         "use_pK": True,
         "output_d_max": 1,
         "exact_relu_k2": args.exact_relu_k2,
+        "exact_relu_cov": args.exact_relu_cov,
     }
     cfg_summary = config_summary(cumulant_config)
     num_layers = args.hidden_depth + 1

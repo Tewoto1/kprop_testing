@@ -275,6 +275,7 @@ def nonlin_kprop(
     use_pK: bool = True,
     factor: bool = False,
     exact_relu_k2: bool = False,
+    exact_relu_cov: bool = False,
 ) -> HTower:
     """
     Propagate cumulants through nonlinearity.
@@ -291,18 +292,31 @@ def nonlin_kprop(
         exact_relu_k2: For the ReLU nonlinearity at k_max==2 ONLY, use the exact
             closed-form scalar Gaussian-ReLU mean/covariance update
             (``src.mlp_kprop.relu_k2_exact``) instead of the harmonic /
-            power-cumulant expansion. Ignored for any other nonlinearity or k_max
-            (so the general algorithm is untouched). See that module for the
-            formulas; the per-coordinate marginals become exact.
+            power-cumulant expansion. Marginals become exact, but the off-diagonal
+            covariance uses the leading-order gain ``Sigma_ij * c_i * c_j``.
+            Ignored for any other nonlinearity or k_max.
+        exact_relu_cov: For the ReLU nonlinearity at k_max==2 ONLY, use the EXACT
+            bivariate-Gaussian ReLU covariance (``src.mlp_kprop.exact_relu_covariance``):
+            the off-diagonal ``Sigma_ij`` becomes the exact pairwise
+            ``Cov(ReLU(Z_i), ReLU(Z_j))`` (no gain approximation). Takes precedence
+            over ``exact_relu_k2``. Depends on scipy and is non-autograd. Ignored
+            for any other nonlinearity or k_max (so the general algorithm is
+            untouched, and K>=3 is never routed here).
 
     Returns:
         K_out: Output cumulants (with identity metric)
     """
-    # Exact closed-form ReLU covariance propagation (opt-in "true" path). Strictly
+    # Exact closed-form ReLU covariance propagation (opt-in "true" paths). Strictly
     # gated to ReLU + k_max==2; everything else falls through to the general code.
-    if exact_relu_k2 and k_max == 2 and _is_relu_wick_coef(nonlin_wick_coef):
-        from src.mlp_kprop.relu_k2_exact import relu_k2_exact_kprop
-        return relu_k2_exact_kprop(K_in)
+    # exact_relu_cov (exact bivariate covariance) takes precedence over
+    # exact_relu_k2 (leading-order Hermite gain).
+    if k_max == 2 and _is_relu_wick_coef(nonlin_wick_coef):
+        if exact_relu_cov:
+            from src.mlp_kprop.exact_relu_covariance import exact_relu_covariance_kprop
+            return exact_relu_covariance_kprop(K_in)
+        if exact_relu_k2:
+            from src.mlp_kprop.relu_k2_exact import relu_k2_exact_kprop
+            return relu_k2_exact_kprop(K_in)
 
     if not use_pK and kind != BASE:
         # TODO: If we really want to, we can ablate use_pK separately from kind=BASE
@@ -412,9 +426,11 @@ def nonlin_kprop(
         K_out[d] = DS_harmonic_proj(K_d_ds, r_x)
     return K_out
 
-def relu_kprop(K_in: HTower, k_max: int, kind: Kind=SIMPLE, exact_relu_k2: bool = False) -> HTower:
+def relu_kprop(K_in: HTower, k_max: int, kind: Kind=SIMPLE, exact_relu_k2: bool = False,
+               exact_relu_cov: bool = False) -> HTower:
     return nonlin_kprop(
-        K_in, nonlin_wick_coef=relu_wick_coef, k_max=k_max, kind=kind, exact_relu_k2=exact_relu_k2
+        K_in, nonlin_wick_coef=relu_wick_coef, k_max=k_max, kind=kind,
+        exact_relu_k2=exact_relu_k2, exact_relu_cov=exact_relu_cov,
     )
 
 def poly_kprop(
@@ -465,6 +481,7 @@ def mlp_kprop(
     up_to_layer: Optional[str] = None,
     output_d_max: Optional[int] = None,
     exact_relu_k2: bool = False,
+    exact_relu_cov: bool = False,
 ) -> HTower | dict[str, HTower]:
     """
     Cumulant propagation through MLP layers.
@@ -487,9 +504,13 @@ def mlp_kprop(
         use_pK: Whether to use pK_to_K logic in nonlinear expansion instead of directly computing K.
             (use_pK=False is only for ablation studies; it doesn't get good MSE.)
         exact_relu_k2: For ReLU layers at k_max==2 ONLY, use the exact closed-form
-            scalar Gaussian-ReLU mean/covariance update instead of the harmonic
-            expansion (see nonlin_kprop). No effect for other nonlinearities or
-            k_max, so the general algorithm is preserved.
+            scalar Gaussian-ReLU mean/covariance update (leading-order off-diagonal
+            gain) instead of the harmonic expansion (see nonlin_kprop). No effect
+            for other nonlinearities or k_max.
+        exact_relu_cov: For ReLU layers at k_max==2 ONLY, use the EXACT bivariate
+            Gaussian ReLU covariance (see nonlin_kprop). Takes precedence over
+            exact_relu_k2. No effect for other nonlinearities or k_max, so the
+            general algorithm (and all K>=3 behavior) is preserved.
         up_to_layer: Output cumulants up to and including this layer.
             Takes a string f'pre{l}' or f'act{l}', interpreted as going up to the preactivation
             or activation labeled l, respectively. None means go through all layers.
@@ -534,6 +555,7 @@ def mlp_kprop(
                 use_pK=use_pK,
                 factor=factor,
                 exact_relu_k2=exact_relu_k2,
+                exact_relu_cov=exact_relu_cov,
             )
             if output_all:
                 K_by_layer[f"act{l}"] = clone_tower(K, d_max=output_d_max)
