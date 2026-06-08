@@ -193,7 +193,7 @@ class FactoredTensor4:
             assume_symmetric=True,
         )
 
-    def to_tensor(self) -> Float[Tensor, "n n n n"]:
+    def to_tensor(self) -> Float[Tensor, "n n n n"]:  # type: ignore
         # Symmetrize is slightly wasteful because (i, j) and (k, l) are already symmetric. But whatever.
         return symmetrize(
             cached_einsum(

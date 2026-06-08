@@ -147,3 +147,75 @@ def train_model_to_zero(
         "final_train_loss": final_loss,
         "train_steps_run": steps_run,
     }
+
+
+def train_model_to_halfspace(
+    *,
+    model: MLP,
+    input_dim: int,
+    output_dim: int,
+    steps: int,
+    batch_size: int,
+    lr: float,
+    weight_decay: float = 0.0,
+    offset_std: float = 1.0,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float64,
+    loss_tol: float = 0.0,
+    log_every: int = 0,
+) -> dict:
+    """Train ``model`` to classify whether x ~ N(0, I) lies in random half-spaces.
+
+    Each of the ``output_dim`` output components gets its own FIXED random affine
+    half-space: a unit normal ``w_j`` and offset ``b_j ~ N(0, offset_std^2)``,
+    drawn once. The per-component target is the 0/1 indicator
+    ``y_j = 1[x . w_j > b_j]``; the loss is MSE(model(x), y) on freshly-sampled
+    Gaussian inputs each step (so there is no fixed dataset to overfit). This gives
+    a genuinely different trained weight structure from ``train_model_to_zero``
+    (the per-component output mean tends to ``E[y_j] = Phi(-b_j)``, not 0), so it is
+    a second probe of how training affects cumulant propagation.
+
+    Stops early if the running loss falls below ``loss_tol`` (when > 0). MSE against
+    a hard {0,1} boundary plateaus above 0, so usually leave ``loss_tol = 0``.
+
+    Returns a stats dict: initial_train_loss, final_train_loss, train_steps_run.
+    """
+    model.train()
+    # Fixed random affine half-spaces, one per output component.
+    Wn = torch.randn(output_dim, input_dim, device=device, dtype=dtype)
+    Wn = Wn / Wn.norm(dim=1, keepdim=True).clamp_min(1e-12)
+    b = offset_std * torch.randn(output_dim, device=device, dtype=dtype)
+
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    initial_loss: Optional[float] = None
+    final_loss = float("nan")
+    steps_run = 0
+
+    with torch.enable_grad():
+        for step in range(steps):
+            x = torch.randn(batch_size, input_dim, device=device, dtype=dtype)
+            y = (x @ Wn.T - b > 0).to(dtype)  # (batch, output_dim) 0/1 labels
+            out = model(x).out
+            loss = (out - y).pow(2).mean()  # MSE to the half-space indicators
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+
+            loss_val = float(loss.detach().item())
+            if initial_loss is None:
+                initial_loss = loss_val
+            final_loss = loss_val
+            steps_run = step + 1
+
+            if log_every and (step % log_every == 0 or step == steps - 1):
+                print(f"    [halfspace] step {step:5d}/{steps}  loss={loss_val:.6e}", flush=True)
+
+            if loss_tol > 0.0 and loss_val < loss_tol:
+                break
+
+    model.eval()
+    return {
+        "initial_train_loss": float("nan") if initial_loss is None else initial_loss,
+        "final_train_loss": final_loss,
+        "train_steps_run": steps_run,
+    }

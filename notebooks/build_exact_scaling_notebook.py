@@ -1,17 +1,24 @@
 """Generates notebooks/exact_relu_k2_width_scaling_colab.ipynb (valid nbformat-4 JSON).
 
-Focused companion to build_notebook.py. The scientific question here is narrow:
+The question this notebook answers:
 
-    After training an MLP to output 0, how does the error of the EXACT closed-form
-    K=2 ReLU cumulant propagation (exact_relu_k2=True, k_max=2) scale with width n,
-    and how does it compare to the approximate harmonic "propagation" path
-    (exact_relu_k2=False) at the same k_max=2?
+    The cumulant-propagation mean is accurate for random/initial MLPs but DEGRADES
+    after a model is trained (the known "trained-model" problem). The default k=2
+    propagation approximates the ReLU off-diagonal covariance by the leading-order
+    gain Sigma_ij * c_i * c_j. Does replacing that with the EXACT bivariate-Gaussian
+    ReLU covariance (exact_relu_cov=True) make the trained-model breakdown go away?
 
-It reuses the SAME repo library as build_notebook.py (cumulant_adapter, model_utils,
-metrics) and the SAME width-scaling methodology as that notebook's section 9
-(input_dim = width, vector output, MC-variance-debiased RMS, log-log slope fit).
-Nothing is reimplemented; the exact path is the one added in
-src/mlp_kprop/relu_k2_exact.py and wired through mlp_kprop via exact_relu_k2.
+So we compare, at the SAME budget k_max=2, on the SAME trained models:
+    - "approx (k=2)" : the default propagation (gain approximation), and
+    - "exact (k=2)"  : the exact bivariate covariance (src/mlp_kprop/exact_relu_covariance.py),
+and look at how each one's error-vs-Monte-Carlo scales with width n, initial vs
+trained-to-zero. If the EXACT path scales better than the approx path AFTER
+training, the covariance approximation was the culprit; if they scale the same,
+it is not (the breakdown is intrinsic to k=2 / training-induced correlations).
+
+Reuses the SAME repo library and the SAME width-scaling methodology as
+build_notebook.py section 9 (input_dim=width, vector output, MC-variance-debiased
+RMS, log-log slope fit). Nothing is reimplemented.
 
 Run:  .venv/bin/python notebooks/build_exact_scaling_notebook.py
 """
@@ -36,48 +43,55 @@ def code(text):
 
 
 # =============================================================================
-md(r"""# Trained-to-zero width scaling — **exact** vs **approximate** K=2 cumulant propagation
+md(r"""# Does the EXACT ReLU covariance fix cumulant propagation on **trained** models?
 
-This notebook answers one question, end to end and on Colab:
+Cumulant propagation predicts the output mean of a wide random MLP well, but its
+accuracy **degrades after the model is trained** (see the main notebook's Q3: the
+`k_max` refinement collapses). One suspect is the K=2 step's **off-diagonal
+covariance**: the default propagation approximates
+`Cov(ReLU(Z_i), ReLU(Z_j))` by the leading-order gain `Sigma_ij * c_i * c_j`
+(`c_i = Phi(mu_i/sigma_i)`). This notebook tests whether computing that covariance
+**exactly** removes the trained-model problem.
 
-> **Train an MLP so its output is ≈ 0. How does the error of the EXACT closed-form
-> K=2 ReLU cumulant propagation scale with width `n`?** And how does it compare to
-> the approximate ("propagation") harmonic path at the same budget `k_max = 2`?
+**Two versions of the algorithm, same budget `k_max = 2`, same model (no copy):**
+- **`approx (k=2)`** — the default harmonic propagation (the gain approximation).
+- **`exact (k=2)`** — `exact_relu_cov=True`: the **exact** bivariate-Gaussian ReLU
+  covariance, `new_Sigma_ij = E[ReLU(Z_i)ReLU(Z_j)] − new_mu_i·new_mu_j`, no gain
+  approximation (`src/mlp_kprop/exact_relu_covariance.py`).
 
-**Two runnable versions of the same algorithm, on the same code (no copy):**
-- **`propagation`** (`exact_relu_k2=False`): the general harmonic / power-cumulant
-  K=2 step.
-- **`exact`** (`exact_relu_k2=True`): the exact closed-form scalar Gaussian-ReLU
-  mean/covariance update added in `src/mlp_kprop/relu_k2_exact.py`. The
-  per-coordinate marginals (mean, diagonal variance) are *exact*; the off-diagonal
-  covariance uses the first-order gain `c_i = Φ(α_i)`.
+**The test.** We probe **two trained regimes** (plus the untrained control), so the
+conclusion does not hinge on a single task:
+1. **`train_to_zero`** — train the output to 0 (MSE to 0), early-stopping at a
+   *moderate* tolerance so the output stays large enough that the comparison is not
+   swamped by Monte-Carlo / floating-point noise.
+2. **`halfspace`** — train each output component to classify whether the input lies
+   in a random affine half-space `{x : w_j·x > b_j}` (MSE to the 0/1 indicator); a
+   genuinely different learned weight structure (per-component mean → `Phi(−b_j)`).
 
-> **Key finding (verified in §4):** for ReLU these two are **numerically identical**
-> (`‖exact − propagation‖ ≈ 1e-15`). The general `k_max=2` harmonic path *is* the
-> exact closed-form Gaussian-ReLU propagation — so the new `relu_k2_exact.py` is a
-> direct, self-contained re-derivation that validates it. The real accuracy lever is
-> therefore **`k_max`**, so we scale the `exact` (`k=2`) path against the
-> higher-order `k_max=3` propagation.
+For each `(width n, seed, regime)` (with `input_dim = n`) we measure the
+MC-variance-debiased error of the propagated mean and its scaling with `n`, for
+both methods. Then ask, **for each training regime**:
 
-> **Why depth matters (read this).** For a **single hidden layer** the
-> preactivation is exactly Gaussian, so the `exact` path returns the *exact*
-> output mean (error = MC noise, nothing to scale). The interesting — and only
-> non-trivial — regime is **≥ 2 hidden layers**, where the first-order off-diagonal
-> covariance feeds the next layer's variance and the end-to-end mean becomes
-> approximate. We therefore default `HIDDEN_DEPTH = 2`.
+> Does **`exact (k=2)`** scale **better** than **`approx (k=2)`** after training
+> (→ the covariance approximation was the problem) or **the same** (→ it was not;
+> the breakdown is intrinsic to k=2 / training-induced correlations)?
+
+> **Depth matters.** With **1 hidden layer** the output mean depends only on the
+> (exact) ReLU *marginals*, so both versions give the exact mean — the off-diagonal
+> covariance never enters. The covariance only matters at **≥ 2 hidden layers**
+> (it feeds the next layer's variance), so we default `HIDDEN_DEPTH = 2`.
 
 Nothing here reimplements cumulant propagation: we call the repo's `mlp_kprop` as a
-black box and only flip the `exact_relu_k2` flag. Section 2 prints the source files
-so you can confirm it.
+black box and only flip `exact_relu_cov`. Section 2 prints the source files.
 """)
 
 # --- Setup -------------------------------------------------------------------
 md(r"""## 0. Setup — get the repo and install the *minimal* dependencies
 
-Same as the main notebook. Point at the repo (clone URL or local/Drive path). The
-checkout **must contain `src/mlp_kprop/relu_k2_exact.py` and the `exact_relu_k2`
-flag** — i.e. push the branch with that change before running on Colab (section 2
-checks this and fails loudly otherwise).
+Point at the repo (clone URL or local/Drive path). The checkout **must contain
+`src/mlp_kprop/exact_relu_covariance.py` and the `exact_relu_cov` flag** — push the
+branch with that change before running on Colab (section 2 checks and fails loudly
+otherwise). The exact path also needs **scipy** (for the bivariate normal CDF).
 """)
 
 code(r"""
@@ -116,8 +130,9 @@ if REPO_DIR not in sys.path:
 print("IN_COLAB:", IN_COLAB)
 print("REPO_DIR:", REPO_DIR)
 
+# scipy is REQUIRED by the exact path (bivariate normal CDF via Owen's T).
 subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-                "jaxtyping", "einops", "opt_einsum", "joblib", "tqdm"], check=False)
+                "jaxtyping", "einops", "opt_einsum", "joblib", "tqdm", "scipy"], check=False)
 print("deps installed")
 """)
 
@@ -125,10 +140,9 @@ print("deps installed")
 md(r"""## 1. Global numerical settings
 
 - **kprop runs in `float64`** (the adapter casts a float64 copy of the model).
-- On GPU we do **training + Monte-Carlo in `float32`** (much faster; MC accuracy is
-  limited by `1/√N`, not float32 rounding, and sums accumulate in float64). kprop
-  is unaffected — it always gets a float64 model.
-- Device = CUDA if available, else CPU.
+- On GPU we do **training + Monte-Carlo in `float32`** (fast; MC accuracy is limited
+  by `1/√N`, not float32 rounding). The exact-covariance path always runs in
+  float64 on the CPU (NumPy/SciPy) and returns tensors on the original device.
 """)
 
 code(r"""
@@ -143,12 +157,12 @@ print("device:", DEVICE, "| MODEL_DTYPE:", MODEL_DTYPE, "| MC_BATCH:", MC_BATCH)
 """)
 
 # --- Verify the real algorithm + the exact path ------------------------------
-md(r"""## 2. Verify we are calling the **real** algorithm **and** the exact path exists
+md(r"""## 2. Verify the **real** algorithm and the exact-covariance path
 
-Prints the source files of `mlp_kprop` and of the exact ReLU K=2 module, and
-asserts the `exact_relu_k2` flag is present on `mlp_kprop`. If this assert fails,
-your checkout predates the change — push/pull the branch that adds
-`src/mlp_kprop/relu_k2_exact.py`.
+Prints the source files of `mlp_kprop` and the exact bivariate-covariance module,
+and asserts the `exact_relu_cov` flag is present. If the assert fails, your checkout
+predates the change — push/pull the branch that adds
+`src/mlp_kprop/exact_relu_covariance.py`.
 """)
 
 code(r"""
@@ -157,137 +171,124 @@ import src.mlp_kprop.kprop_harmonic as kp
 from src.mlp_kprop.mlp import MLP
 from src.mlp_kprop.wick import WICK_COEF_D
 
-print("mlp_kprop defined in:        ", inspect.getsourcefile(kp.mlp_kprop))
-assert "exact_relu_k2" in inspect.signature(kp.mlp_kprop).parameters, (
-    "This checkout has no exact_relu_k2 flag — push/pull the branch that adds "
-    "src/mlp_kprop/relu_k2_exact.py and wires exact_relu_k2 through mlp_kprop."
+print("mlp_kprop defined in:                 ", inspect.getsourcefile(kp.mlp_kprop))
+assert "exact_relu_cov" in inspect.signature(kp.mlp_kprop).parameters, (
+    "This checkout has no exact_relu_cov flag — push/pull the branch that adds "
+    "src/mlp_kprop/exact_relu_covariance.py and wires exact_relu_cov through mlp_kprop."
 )
-import src.mlp_kprop.relu_k2_exact as rk2
-print("exact ReLU K=2 step defined in:", inspect.getsourcefile(rk2.relu_k2_exact_kprop))
-print("activations supported:        ", list(WICK_COEF_D.keys()))
-print("\n--- closed-form moments (the exact computation) ---")
-print("".join(inspect.getsource(rk2.relu_gaussian_moments).splitlines(keepends=True)[:1]))
-print(inspect.getdoc(rk2.relu_k2_covariance_update))
+import src.mlp_kprop.exact_relu_covariance as erc
+print("exact bivariate ReLU covariance in:   ", inspect.getsourcefile(erc.exact_relu_covariance_kprop))
+import scipy
+print("scipy version (needed for Phi2):      ", scipy.__version__)
+print("activations supported:                ", list(WICK_COEF_D.keys()))
+print("\n--- the exact K=2 covariance routine (docstring) ---")
+print(inspect.getdoc(erc.exact_relu_covariance_np))
 """)
 
 # --- The setup / knobs -------------------------------------------------------
 md(r"""## 3. The exact setup and the knobs
 
-For a fixed trained model `f` and `X ~ N(0, I_n)` we estimate `E_X[f(X)]` two ways
-and compare them to a Monte-Carlo reference:
-- **kprop (exact or propagation)** = degree-1 cumulant `K_out[1]` from `mlp_kprop`,
-- **MC truth** = sample mean of `f(X)`.
+Two methods, both at **`k_max = 2`** (the only difference is `exact_relu_cov`):
+- `approx (k=2)` → default propagation (leading-order off-diagonal gain).
+- `exact (k=2)`  → `exact_relu_cov=True` (exact bivariate ReLU covariance).
 
-We measure the **MC-variance-debiased per-entry RMS error** of the mean and how it
-scales with width `n`. Following the main notebook's section 9 we set
-**`input_dim = width`** (so the `n^(-k/2)` law is not bottlenecked by a fixed
-fan-in) and use a **vector output** so the per-entry MSE averages over many
-components.
-
-Three methods (all the same algorithm; only the config differs):
-- `exact (k=2)`  → `exact_relu_k2=True,  k_max=2`  (the TRUE closed-form ReLU K=2 step)
-- `approx (k=2)` → `exact_relu_k2=False, k_max=2`  (the general harmonic K=2 step; ≡ exact for ReLU)
-- `approx (k=3)` → `exact_relu_k2=False, k_max=3`  (higher-order; the real accuracy lever)
-
-Phases: `initial` (untrained, the control) and `trained_to_zero` (the question).
+We evaluate each on the **same** models — `initial` (control), `train_to_zero`,
+and `halfspace` — across widths, with **`input_dim = width`** and a **vector
+output** so the per-entry MSE averages over many components (same methodology as
+the main notebook's section 9). For `halfspace`, each of the `OUTPUT_DIM`
+components is its own random half-space, which doubles as the vector output.
 """)
 
 code(r"""
 from cumulant_experiments.cumulant_adapter import run_cumulant_propagation_from_model, extract_mean, config_summary
 from cumulant_experiments.metrics import estimate_empirical_mean, compare_means
-from cumulant_experiments.model_utils import make_mlp, train_model_to_zero, set_seed, layer_norms
+from cumulant_experiments.model_utils import make_mlp, train_model_to_zero, train_model_to_halfspace, set_seed
 
 # ---- Architecture ----------------------------------------------------------
-HIDDEN_DEPTH = 2        # >=2 so the exact path is genuinely approximate (depth 1 is exact -> no scaling)
-ACTIVATION   = "relu"   # the exact path only applies to ReLU
+HIDDEN_DEPTH = 2        # >=2 so the off-diagonal covariance actually matters (depth 1 ignores it)
+ACTIVATION   = "relu"   # the exact path applies to ReLU
 USE_BIAS     = True
-OUTPUT_DIM   = 64       # vector output: per-entry MSE averages over many components
+OUTPUT_DIM   = 64       # vector output (and # of random half-spaces for the halfspace task)
 
-# ---- The methods. Each is just an mlp_kprop config; nothing reimplemented. -
-COMMON_CFG = {"kind": "simple", "use_avg_metric": False, "use_pK": True, "output_d_max": 1}
+# ---- The two methods (both k_max=2; only exact_relu_cov differs) -----------
+COMMON_CFG = {"kind": "simple", "use_avg_metric": False, "factor": False, "use_pK": True, "output_d_max": 1}
 METHODS = {
-    "exact (k=2)":  {**COMMON_CFG, "k_max": 2, "factor": False, "exact_relu_k2": True},
-    "approx (k=2)": {**COMMON_CFG, "k_max": 2, "factor": False, "exact_relu_k2": False},
-    "approx (k=3)": {**COMMON_CFG, "k_max": 3, "factor": True,  "exact_relu_k2": False},
+    "approx (k=2)": {**COMMON_CFG, "k_max": 2, "exact_relu_cov": False},  # default gain approximation
+    "exact (k=2)":  {**COMMON_CFG, "k_max": 2, "exact_relu_cov": True},   # exact bivariate covariance
 }
-# Methods used in the scaling sweep. "approx (k=2)" is identical to "exact (k=2)"
-# for ReLU (shown in §4), so we keep just the exact k=2 path + the k=3 reference;
-# add "approx (k=2)" here if you want to SEE the two K=2 curves overlap.
-SWEEP_METHODS = ["exact (k=2)", "approx (k=3)"]
 
-# ---- Sweep ranges (Colab-friendly; scale up for a sharper slope) -----------
-WIDTHS = [32, 64, 128, 256]   # input_dim = width; add 512 for a longer lever arm
-SEEDS  = [0, 1, 2]            # more seeds => tighter medians
-PHASES = ["initial", "trained_to_zero"]
+# ---- Sweep ranges -----------------------------------------------------------
+WIDTHS = [32, 64, 128, 256, 512, 1024]   # input_dim = width. 512/1024 are HEAVY (esp. the exact
+                                         # path: CPU/scipy, O(n^2) per layer) -- drop them for a
+                                         # quick look; keep them for the published slope.
+SEEDS  = [3, 4, 5, 6]                     # 4 seeds for tighter medians
+PHASES = ["initial", "train_to_zero", "halfspace"]   # untrained control + the two training regimes
 
 # ---- Monte-Carlo + training -------------------------------------------------
 MC_SAMPLES     = 500_000      # raise to push the MC-variance floor down
-TRAIN_STEPS    = 8000
-TRAIN_LOSS_TOL = 1e-8         # early-stop once MSE-to-zero < this
+TRAIN_STEPS    = 8000         # both training regimes
+# Moderate early-stop for train_to_zero: stop at MSE < 1e-6 (=> output_rms ~ 1e-3), NOT smaller,
+# so the tiny trained output is not swamped by MC / float64 numerical error. Raise (e.g. 1e-5/1e-4)
+# to leave an even larger output; lower (1e-8) to push kprop harder (noisier comparison).
+TRAIN_LOSS_TOL = 1e-6
+HALFSPACE_OFFSET_STD = 1.0    # random affine offset b_j ~ N(0, this^2); per-component mean -> Phi(-b_j)
 BATCH_SIZE     = 1024
 LR             = 1e-3
 
 for name in METHODS:
     print(f"{name:13s} cfg:", config_summary(METHODS[name]))
+print("regimes:", PHASES, "| seeds:", SEEDS, "| widths:", WIDTHS)
 """)
 
-# --- Verification: exact == approx at k=2; depth caveat ----------------------
-md(r"""## 4. Verify: (a) `exact (k=2)` ≡ `approx (k=2)` for ReLU, and (b) the depth caveat
+# --- Verify exact != approx, and the depth caveat ----------------------------
+md(r"""## 4. Verify the exact path is genuinely different (and the depth caveat)
 
-**(a) The two K=2 versions coincide.** For a ReLU net the exact closed-form K=2
-step and the general harmonic K=2 step produce the *same* output mean to float64
-roundoff (`‖·‖ ≈ 1e-15`), while `k_max=3` differs at order `1e-2`. So `relu_k2_exact.py`
-is a validated re-derivation, and the meaningful accuracy axis is `k_max`.
-
-**(b) Depth caveat.** With **1 hidden layer** the K=2 mean is the *exact* `E[f(X)]`
-(within MC noise, `z ≲ 1`); with **≥ 2 hidden layers** it is approximate — that is
-the regime we scale. We default `HIDDEN_DEPTH = 2`.
+The exact bivariate covariance is a *different computation* from the gain
+approximation — it must change the propagated result for nets deep enough that the
+off-diagonal covariance feeds a later layer. Below:
+- **depth 1:** `exact ≡ approx` (the output mean uses only the exact ReLU
+  marginals), and that mean equals MC within sampling noise — both are exact.
+- **depth ≥ 2:** `exact ≠ approx` — the exact off-diagonal covariance changes the
+  downstream variance and hence the mean. This is the regime we scale.
 """)
 
 code(r"""
-# (a) exact (k=2) vs approx (k=2) vs approx (k=3): same model, compare output means.
 set_seed(0); n0 = 128
+print("||exact(k=2) - approx(k=2)||  on the propagated output mean:")
 for depth in [1, 2, 3]:
-    model = make_mlp(input_dim=n0, hidden_width=n0, hidden_depth=depth, output_dim=8,
-                     activation=ACTIVATION, bias=USE_BIAS, device=DEVICE, dtype=MODEL_DTYPE)
-    cpe = extract_mean(run_cumulant_propagation_from_model(model, n0, METHODS["exact (k=2)"],  device=DEVICE))
-    cpa = extract_mean(run_cumulant_propagation_from_model(model, n0, METHODS["approx (k=2)"], device=DEVICE))
-    cp3 = extract_mean(run_cumulant_propagation_from_model(model, n0, METHODS["approx (k=3)"], device=DEVICE))
-    print(f"depth={depth}: ||exact_k2 - approx_k2|| = {np.linalg.norm(cpe-cpa):.2e}   "
-          f"||exact_k2 - approx_k3|| = {np.linalg.norm(cpe-cp3):.2e}")
-assert np.linalg.norm(cpe - cpa) < 1e-9, "exact and approx k=2 should coincide for ReLU"
-print("=> exact (k=2) and approx (k=2) coincide for ReLU; k=3 is a genuinely different (higher-order) method.\n")
+    m = make_mlp(input_dim=n0, hidden_width=n0, hidden_depth=depth, output_dim=8,
+                 activation=ACTIVATION, bias=USE_BIAS, device=DEVICE, dtype=MODEL_DTYPE)
+    cpa = extract_mean(run_cumulant_propagation_from_model(m, n0, METHODS["approx (k=2)"], device=DEVICE))
+    cpe = extract_mean(run_cumulant_propagation_from_model(m, n0, METHODS["exact (k=2)"], device=DEVICE))
+    print(f"  depth={depth}: {np.linalg.norm(cpe - cpa):.2e}")
+print("=> depth 1: ~0 (mean uses only exact marginals); depth>=2: nonzero (exact off-diagonal covariance matters).\n")
 
-# (b) depth-1 exact mean is the exact E[f(X)]; depth-2 is approximate.
+# depth-1 exactness vs MC (both methods give the exact mean here)
 set_seed(0)
-for depth in [1, 2]:
-    model = make_mlp(input_dim=n0, hidden_width=n0, hidden_depth=depth, output_dim=OUTPUT_DIM,
-                     activation=ACTIVATION, bias=USE_BIAS, device=DEVICE, dtype=MODEL_DTYPE)
-    cp = extract_mean(run_cumulant_propagation_from_model(model, n0, METHODS["exact (k=2)"], device=DEVICE))
-    mc, st = estimate_empirical_mean(model=model, input_dim=n0, num_samples=MC_SAMPLES,
-                                     batch_size=MC_BATCH, device=DEVICE, dtype=MODEL_DTYPE)
-    m = compare_means(cp, mc, st)
-    verdict = "EXACT (within MC noise)" if m['mc_noise_z'] < 3 else "approximate (real error)"
-    print(f"hidden_depth={depth}: exact-path  rel_err={m['relative_error_mean']:.3e}  z={m['mc_noise_z']:.2f}  -> {verdict}")
+m = make_mlp(input_dim=n0, hidden_width=n0, hidden_depth=1, output_dim=OUTPUT_DIM,
+             activation=ACTIVATION, bias=USE_BIAS, device=DEVICE, dtype=MODEL_DTYPE)
+cp = extract_mean(run_cumulant_propagation_from_model(m, n0, METHODS["exact (k=2)"], device=DEVICE))
+mc, st = estimate_empirical_mean(model=m, input_dim=n0, num_samples=MC_SAMPLES, batch_size=MC_BATCH, device=DEVICE, dtype=MODEL_DTYPE)
+print(f"depth-1 exact vs MC: rel_err={compare_means(cp, mc, st)['relative_error_mean']:.2e}, "
+      f"z={compare_means(cp, mc, st)['mc_noise_z']:.2f} (z<~1 => exact)")
 """)
 
 # --- The main sweep ----------------------------------------------------------
 md(r"""## 5. The width-scaling sweep (the experiment)
 
-For each `(width, seed, phase)`: build the net (`input_dim = width`), optionally
-train it to zero, draw one Monte-Carlo reference, then evaluate **both** methods
-(`exact`, `propagation`) against that same MC. We record the MC-variance-debiased
-per-entry RMS error, its scale-free version (÷ `output_rms`), and a
-**signal-to-floor** ratio (`>~3` = resolved above MC noise; `<~1` = unreliable).
-
-Reusing the section-9 estimator helpers verbatim (debiasing + slope fit).
+For each `(width, seed, regime)`: build the net (`input_dim = width`), apply the
+regime's training (none / output→0 / half-space classification), draw one
+Monte-Carlo reference, then evaluate **both** methods against that same MC. We
+record the MC-variance-debiased per-entry RMS error, its scale-free version
+(÷ `output_rms`), and a signal-to-floor ratio (`>~3` resolved; `<~1` below the MC
+floor). The two training regimes share one model init per seed (rebuilt each time).
 """)
 
 code(r"""
 import torch, numpy as np, pandas as pd, math
 from cumulant_experiments.cumulant_adapter import run_cumulant_propagation_from_model, extract_mean
 from cumulant_experiments.metrics import estimate_empirical_mean
-from cumulant_experiments.model_utils import make_mlp, train_model_to_zero, set_seed
+from cumulant_experiments.model_utils import make_mlp, train_model_to_zero, train_model_to_halfspace, set_seed
 
 def debiased_rms(cp_mean, mc_mean, mc_stats):
     cp = np.asarray(cp_mean, np.float64).reshape(-1)
@@ -313,19 +314,25 @@ for width in WIDTHS:
     in_dim = width                                  # <<< input dimension scales WITH width
     for seed in SEEDS:
         for phase in PHASES:
-            set_seed(seed)                          # same init across phases
+            set_seed(seed)                          # same init across phases & methods
             model = make_mlp(input_dim=in_dim, hidden_width=width, hidden_depth=HIDDEN_DEPTH,
                              output_dim=OUTPUT_DIM, activation=ACTIVATION, bias=USE_BIAS,
                              device=DEVICE, dtype=MODEL_DTYPE)
             final_loss = float("nan")
-            if phase == "trained_to_zero":
+            if phase == "train_to_zero":
                 stats = train_model_to_zero(model=model, input_dim=in_dim, steps=TRAIN_STEPS,
                                             batch_size=BATCH_SIZE, lr=LR, device=DEVICE,
                                             dtype=MODEL_DTYPE, loss_tol=TRAIN_LOSS_TOL)
                 final_loss = stats["final_train_loss"]
+            elif phase == "halfspace":
+                stats = train_model_to_halfspace(model=model, input_dim=in_dim, output_dim=OUTPUT_DIM,
+                                                 steps=TRAIN_STEPS, batch_size=BATCH_SIZE, lr=LR,
+                                                 device=DEVICE, dtype=MODEL_DTYPE,
+                                                 offset_std=HALFSPACE_OFFSET_STD, loss_tol=0.0)
+                final_loss = stats["final_train_loss"]
             mc, st = estimate_empirical_mean(model=model, input_dim=in_dim, num_samples=MC_SAMPLES,
                                              batch_size=MC_BATCH, device=DEVICE, dtype=MODEL_DTYPE)
-            for method in SWEEP_METHODS:            # evaluate each method against the SAME MC
+            for method in METHODS:                  # evaluate both against the SAME MC
                 cp = extract_mean(run_cumulant_propagation_from_model(model, in_dim, METHODS[method], device=DEVICE))
                 rms, meas, floor = debiased_rms(cp, mc, st)
                 rel = rms / (st["empirical_output_rms"] + 1e-30)
@@ -340,99 +347,111 @@ dfsc.head(8)
 """)
 
 code(r"""
-# Slope summary: debiased RMS ~ n^slope, and scale-free RMS ~ n^slope, per (method, phase).
-print("Scaling of the error with width  (slope of debiased RMS vs n; theory ~ -k_max/2)")
-print("  s/floor < ~3 means a point is at/below the MC noise floor -> raise MC_SAMPLES.\n")
+print("Scale-free debiased RMS (median over seeds) and its slope vs width.")
+print("  theory at init for k_max=2 ~ n^-1.  s/floor < ~3 => below MC floor (raise MC_SAMPLES).\n")
 for phase in PHASES:
-    for method in SWEEP_METHODS:
+    for method in METHODS:
         sub = dfsc[(dfsc.phase == phase) & (dfsc.method == method)]
-        med  = sub.groupby("width")["debiased_rms"].median()
         rmed = sub.groupby("width")["rel_debiased_rms"].median()
         s2f  = sub.groupby("width")["s_to_floor"].median()
-        ws = sorted(med.index)
-        slope_abs = loglog_slope(ws, [med[w] for w in ws])
-        slope_rel = loglog_slope(ws, [rmed[w] for w in ws])
-        print(f"  {phase:15s} {method:12s}: slope_abs={slope_abs:+.2f}  slope_scalefree={slope_rel:+.2f}  "
-              + "  ".join(f"n{w}:{rmed[w]:.2e}(s/f={s2f[w]:.0f})" for w in ws))
-print("\nHeadline (the question): the trained-to-zero EXACT (k=2) scale-free slope is")
-sub = dfsc[(dfsc.phase=='trained_to_zero') & (dfsc.method=='exact (k=2)')]
-rmed = sub.groupby('width')['rel_debiased_rms'].median(); ws = sorted(rmed.index)
-print(f"    slope_scalefree = {loglog_slope(ws, [rmed[w] for w in ws]):+.2f}   "
-      "(near -1 => K=2 width-scaling survives training; ~0 => training flattens it)")
+        ws = sorted(rmed.index)
+        print(f"  {phase:15s} {method:12s}: slope={loglog_slope(ws,[rmed[w] for w in ws]):+.2f}  "
+              + "  ".join(f"n{w}={rmed[w]:.2e}(s/f={s2f[w]:.0f})" for w in ws))
+
+print("\nDoes the EXACT covariance help? approx/exact ratio of scale-free RMS (>1 => exact more accurate):")
+for phase in PHASES:
+    a = dfsc[(dfsc.phase==phase)&(dfsc.method=="approx (k=2)")].groupby("width")["rel_debiased_rms"].median()
+    e = dfsc[(dfsc.phase==phase)&(dfsc.method=="exact (k=2)")].groupby("width")["rel_debiased_rms"].median()
+    ws = sorted(set(a.index) & set(e.index))
+    print(f"  {phase:15s}: " + "  ".join(f"n{w}={ (a[w]/e[w]) :.2f}x" if e[w]>0 else f"n{w}=NA" for w in ws))
+
+print("\nHEADLINE (the question): per-regime slopes, exact vs approx")
+for phase in [p for p in PHASES if p != "initial"]:
+    line = f"  [{phase}] "
+    for method in METHODS:
+        sub = dfsc[(dfsc.phase==phase) & (dfsc.method==method)]
+        rmed = sub.groupby('width')['rel_debiased_rms'].median(); ws = sorted(rmed.index)
+        line += f"{method}: slope={loglog_slope(ws,[rmed[w] for w in ws]):+.2f}   "
+    print(line)
+print("  Same slope+magnitude (ratio ~1x) => the exact covariance does NOT fix the trained-model problem.")
+print("  Exact steeper/lower               => the covariance approximation was (part of) the problem.")
 """)
 
 # --- Plots -------------------------------------------------------------------
-md(r"""## 6. Plots — the scaling of the error with width
+md(r"""## 6. Plots — error scaling, approx vs exact, initial vs trained
 
-- **Left (absolute):** debiased per-entry RMS error vs `n`. Thin dotted guides =
-  `n^(-1)` (k=2 theory) and `n^(-1.5)` (k=3 theory). Marker/line per method; blue =
-  `initial`, red = `trained_to_zero`.
-- **Right (scale-free):** the same error ÷ each model's `output_rms`, so `initial`
-  and `trained_to_zero` are directly comparable despite the trained output being
-  far smaller.
+- **Left (absolute):** debiased per-entry RMS vs `n`; dotted = `n^-1` guide.
+- **Right (scale-free):** error ÷ `output_rms`, so initial and trained are directly
+  comparable.
 
-**What to look for:** does the **`exact (k=2)` / `trained_to_zero`** curve (red)
-keep a clean `~n^-1` slope, or does training flatten it? And at init, is
-`approx (k=3)` steeper than `exact (k=2)` (does higher `k_max` still buy a faster
-rate)?
+Solid = `exact (k=2)`, dashed = `approx (k=2)`; blue = `initial`, red =
+`train_to_zero`, green = `halfspace`. **For each training regime: if its solid and
+dashed curves lie on top of each other, the exact covariance did not fix that
+regime's problem.**
 """)
 
 code(r"""
 fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
-mc_color = {"initial": "tab:blue", "trained_to_zero": "tab:red"}
-mt_style = {"exact (k=2)": dict(ls="-", marker="o"),
-            "approx (k=2)": dict(ls=":", marker="x"),
-            "approx (k=3)": dict(ls="--", marker="s")}
-theory_slope = {"exact (k=2)": 1.0, "approx (k=2)": 1.0, "approx (k=3)": 1.5}
+mc_color = {"initial": "tab:blue", "train_to_zero": "tab:red", "halfspace": "tab:green"}
+mt_style = {"exact (k=2)": dict(ls="-", marker="o"), "approx (k=2)": dict(ls="--", marker="s")}
 
 for ax, col, ttl in [(axes[0], "debiased_rms", "ABSOLUTE debiased per-entry RMS error"),
                      (axes[1], "rel_debiased_rms", "SCALE-FREE error (RMS / output_rms)")]:
     for phase in PHASES:
-        for method in SWEEP_METHODS:
+        for method in METHODS:
             sub = dfsc[(dfsc.phase == phase) & (dfsc.method == method)]
             if sub.empty: continue
             med = sub.groupby("width")[col].median()
             ws = np.array(sorted(med.index)); y = med.reindex(ws).to_numpy()
             ax.plot(ws, np.where(y <= 0, np.nan, y), color=mc_color[phase],
-                    label=f"{method} / {phase}", **mt_style.get(method, dict(ls="-", marker="o")))
-    # theory guides anchored at each method's initial smallest width
-    for method in SWEEP_METHODS:
-        base = dfsc[(dfsc.method==method)&(dfsc.phase=="initial")].groupby("width")[col].median()
-        bw = np.array(sorted(base.index), float)
-        if len(base) and base.iloc[0] > 0:
-            ax.plot(bw, base.iloc[0]*(bw/bw[0])**(-theory_slope.get(method,1.0)),
-                    color="gray", ls=":", lw=1.0, alpha=0.6)
+                    label=f"{method} / {phase}", **mt_style[method])
+    base = dfsc[(dfsc.method=="approx (k=2)")&(dfsc.phase=="initial")].groupby("width")[col].median()
+    bw = np.array(sorted(base.index), float)
+    if len(base) and base.iloc[0] > 0:
+        ax.plot(bw, base.iloc[0]*(bw/bw[0])**(-1.0), color="gray", ls=":", lw=1.2, alpha=0.7, label="theory n^-1")
     ax.set_xscale("log", base=2); ax.set_yscale("log")
     ax.set_xlabel("width n  (= input_dim)"); ax.set_title(ttl)
     ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=8)
 plt.tight_layout(); plt.show()
-print("gray dotted = theory guides n^(-k_max/2). exact (k=2) and approx (k=2) overlap (same computation).")
 """)
 
 # --- Conclusions -------------------------------------------------------------
-md(r"""## 7. How to read it
+md(r"""## 7. How to read it (the answer)
 
-- **`exact (k=2)` ≡ `approx (k=2)`** (§4): the new closed form is a validated
-  re-derivation of the general K=2 path for ReLU. Whatever scaling you see for one,
-  you see for the other — they are the same computation.
-- **`exact (k=2)`, `initial`:** the K=2 error falls with width; with
-  `input_dim = width` and `HIDDEN_DEPTH = 2` it should track the `n^-1` guide
-  (the `k_max=2` theory rate). This is the baseline scaling of the exact path.
-- **`exact (k=2)`, `trained_to_zero` — the headline (answers the question):** read
-  its `slope_scalefree` (printed in §5). If it stays near `-1`, training preserves
-  the exact path's width-scaling; if it **flattens** toward `0`, training has
-  induced weight/activation correlations the wide-random-MLP assumption misses —
-  the same failure mode the main notebook documents (training *disables* the
-  width/`k_max` refinement). Our broader runs lean toward the latter.
-- **`exact (k=2)` vs `approx (k=3)`:** higher `k_max` is the only way to scale
-  *faster* than `n^-1`. At init expect `k=3` steeper (~`n^-1.5`); after training,
-  watch whether that advantage collapses (the `k_max` ladder flattening).
+> **What we observed** (depth 2): at **init** the two methods are essentially
+> identical (`approx/exact ≈ 0.98–0.99×`, same slope) — the gain approximation is
+> already good for random weights. After **training** — in **both** the
+> `train_to_zero` and `halfspace` regimes — `exact (k=2)` and `approx (k=2)` stay
+> within a small factor with the ratio **bouncing around 1 (no consistent winner)**.
+> **Conclusion: making the K=2 covariance exact does NOT fix the trained-model
+> problem, for either task.** Re-run with more seeds/widths to confirm on your setup.
 
-**Caveats:** few seeds + shallow depth ⇒ noisy exponents; at large `n` the debiased
-RMS can dip to the MC floor (watch the `s/floor` column and raise `MC_SAMPLES`);
-`k_max=3` is the costly method (use a GPU, or drop it from `SWEEP_METHODS`). Add
-`512` to `WIDTHS` for a longer lever arm on the slope fit. To literally *see* the
-two K=2 versions overlap, add `"approx (k=2)"` to `SWEEP_METHODS` and re-run §5–§6.
+For **each** training regime (`train_to_zero`, `halfspace`), read its two curves
+and the `approx/exact` ratio printed in §5:
+
+- **If `exact (k=2)` and `approx (k=2)` overlap after training** (same slope, ratio
+  ≈ 1×) — the headline result — then **the exact covariance does NOT fix that
+  regime's problem.** Making the K=2 off-diagonal exact is not enough; the
+  degradation comes from elsewhere (training-induced weight/activation correlations
+  that violate the wide-random-MLP assumption, which a *single* Gaussian K=2 state
+  cannot capture regardless of how exactly its covariance is computed). The fix
+  would need higher cumulants (`k_max ≥ 3`) or a non-Gaussian state, not a better
+  K=2 covariance. That the **same** conclusion holds for two *different* trained
+  tasks makes it more robust.
+- **If `exact (k=2)` scales better after training** (steeper slope / ratio > 1, gap
+  widening with `n`) — then the gain approximation **was** a real source of the
+  trained-model error, and the exact covariance recovers (some of) the lost accuracy.
+
+At **initialization** both should track `n^-1` closely and sit near each other; the
+interesting signal is entirely in the **trained** comparisons.
+
+**Caveats:** the two trained means have very different scales (`train_to_zero` ~1e-3
+via the moderate `TRAIN_LOSS_TOL`; `halfspace` ~`Phi(-b_j)`, i.e. O(1)) — the
+**scale-free** panel makes them comparable. Few seeds ⇒ noisy slopes; at large `n`
+the debiased RMS can hit the MC floor (watch `s/floor`, raise `MC_SAMPLES`); the
+exact path is CPU/scipy and O(n²) per layer, so **width 512/1024 are slow** (drop
+them for a quick look). Increase `HIDDEN_DEPTH` to amplify the covariance's
+downstream effect.
 """)
 
 nb = {

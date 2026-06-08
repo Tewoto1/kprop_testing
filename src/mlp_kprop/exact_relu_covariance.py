@@ -1,11 +1,12 @@
 """EXACT bivariate-Gaussian ReLU covariance propagation for K=2.
 
-This is the *true* exact K=2 ReLU activation step. Unlike
-``src.mlp_kprop.relu_k2_exact`` (which is exact on the marginals but uses the
-leading-order Hermite off-diagonal gain ``Sigma_ij <- Sigma_ij * c_i * c_j`` with
-``c_i = Phi(mu_i/sigma_i)``), this module computes the **exact** pairwise
-covariance of ``(ReLU(Z_i), ReLU(Z_j))`` under the joint Gaussian
-``Z ~ N(mu, Sigma)`` using the closed-form bivariate-normal moments.
+This is the *true* exact K=2 ReLU activation step. The general harmonic /
+power-cumulant ``nonlin_kprop`` path (the default propagation algorithm) is exact
+on the ReLU marginals but uses the leading-order Hermite off-diagonal gain
+``Sigma_ij <- Sigma_ij * c_i * c_j`` with ``c_i = Phi(mu_i/sigma_i)`` -- i.e. an
+APPROXIMATION of the off-diagonal covariance. This module instead computes the
+**exact** pairwise covariance of ``(ReLU(Z_i), ReLU(Z_j))`` under the joint
+Gaussian ``Z ~ N(mu, Sigma)`` using the closed-form bivariate-normal moments.
 
 Selectable in experiments as the "exact_relu_covariance" / "k2_exact_bivariate_relu"
 / "exact_gaussian_relu_k2" path (config flag ``exact_relu_cov``).
@@ -71,8 +72,8 @@ try:  # scipy is required for the exact bivariate normal CDF (Owen's T).
 except ImportError as exc:  # pragma: no cover - environment guard
     raise ImportError(
         "exact_relu_covariance requires scipy (scipy.special.owens_t and ndtr). "
-        "Install scipy, or use the pure-torch leading-order path in "
-        "src.mlp_kprop.relu_k2_exact instead."
+        "Install scipy, or run the default (approximate) propagation path with "
+        "exact_relu_cov=False."
     ) from exc
 
 import torch
@@ -223,7 +224,7 @@ def _relu_cross_moment_perfect_corr(
     return np.where(valid, out, 0.0)
 
 
-def exact_relu_k2_covariance_np(
+def exact_relu_covariance_np(
     mu: np.ndarray,
     Sigma: np.ndarray,
     *,
@@ -243,11 +244,42 @@ def exact_relu_k2_covariance_np(
     n = mu.shape[0]
     if Sigma.shape != (n, n):
         raise ValueError(f"Sigma must have shape ({n}, {n}); got {Sigma.shape}")
+    
+    if not np.all(np.isfinite(Sigma)):
+        raise ValueError("Sigma contains non-finite values")
+
+    if not np.all(np.isfinite(mu)):
+        raise ValueError("mu contains non-finite values")
+
+    sym_err = float(np.max(np.abs(Sigma - Sigma.T))) if Sigma.size else 0.0
+    sym_scale = max(1.0, float(np.max(np.abs(Sigma)))) if Sigma.size else 1.0
+    if sym_err > 1e-8 * sym_scale:
+        raise ValueError(
+            f"Sigma must be symmetric for exact ReLU covariance propagation; "
+            f"max |Sigma - Sigma.T| = {sym_err:.3e}, scale={sym_scale:.3e}."
+        )
+
+    # Only remove tiny asymmetry from roundoff.
+    Sigma = 0.5 * (Sigma + Sigma.T)
 
     var = np.diag(Sigma).copy()
     new_mu, second, diag_var = relu_moments_1d_np(mu, var, var_eps=var_eps, neg_rtol=neg_rtol)
 
     det = var <= var_eps  # deterministic coordinates (matches relu_moments_1d_np)
+
+    if det.any():
+        det_cov = np.abs(Sigma[det, :]).copy()
+        det_cov[:, det] = 0.0
+        max_det_cov = float(det_cov.max()) if det_cov.size else 0.0
+        cov_scale = max(1.0, float(np.max(np.abs(Sigma)))) if Sigma.size else 1.0
+
+        # Allow small roundoff, but do not hide a materially inconsistent covariance.
+        if max_det_cov > 1e-8 * cov_scale:
+            raise ValueError(
+                "Sigma has a near-deterministic coordinate with nonzero covariance "
+                f"to another coordinate: max offending covariance={max_det_cov:.3e}, "
+                f"scale={cov_scale:.3e}."
+            )
     sigma = np.sqrt(np.clip(var, 0.0, None))
     safe_sigma = np.where(det, 1.0, sigma)
     alpha = mu / safe_sigma
@@ -309,7 +341,7 @@ def exact_relu_k2_covariance_np(
 # ---------------------------------------------------------------------------
 # Torch wrappers
 # ---------------------------------------------------------------------------
-def exact_relu_k2_covariance_torch(mu: Tensor, Sigma: Tensor, **kwargs) -> tuple[Tensor, Tensor]:
+def exact_relu_covariance_torch(mu: Tensor, Sigma: Tensor, **kwargs) -> tuple[Tensor, Tensor]:
     """Torch entry point: detach to CPU/NumPy, compute exactly, return tensors.
 
     Preserves the input device/dtype. NOT autograd-differentiable (the math runs
@@ -320,7 +352,7 @@ def exact_relu_k2_covariance_torch(mu: Tensor, Sigma: Tensor, **kwargs) -> tuple
     device, dtype = mu.device, mu.dtype
     mu_np = mu.detach().cpu().double().numpy()
     Sigma_np = Sigma.detach().cpu().double().numpy()
-    new_mu_np, new_Sigma_np = exact_relu_k2_covariance_np(mu_np, Sigma_np, **kwargs)
+    new_mu_np, new_Sigma_np = exact_relu_covariance_np(mu_np, Sigma_np, **kwargs)
     new_mu = torch.as_tensor(new_mu_np, device=device, dtype=dtype)
     new_Sigma = torch.as_tensor(new_Sigma_np, device=device, dtype=dtype)
     return new_mu, new_Sigma
@@ -344,7 +376,7 @@ def exact_relu_covariance_kprop(K_in: "dict[int, object]") -> "dict[int, object]
         )
     mu = K1.to_tensor()      # (n,)
     Sigma = K2.to_tensor()   # (n, n)
-    new_mu, new_Sigma = exact_relu_k2_covariance_torch(mu, Sigma)
+    new_mu, new_Sigma = exact_relu_covariance_torch(mu, Sigma)
 
     HTensorCls = type(K1)
     n = K1.n

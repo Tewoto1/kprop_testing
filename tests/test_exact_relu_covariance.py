@@ -16,11 +16,10 @@ import torch
 from mlp_kprop.exact_relu_covariance import (
     bvn_cdf,
     exact_relu_covariance_kprop,
-    exact_relu_k2_covariance_np,
-    exact_relu_k2_covariance_torch,
+    exact_relu_covariance_np,
+    exact_relu_covariance_torch,
     relu_moments_1d_np,
 )
-from mlp_kprop.relu_k2_exact import relu_k2_covariance_update  # the leading-order (gain) path
 
 torch.set_default_dtype(torch.float64)
 
@@ -43,7 +42,7 @@ def test_standard_normal_marginal():
 def test_independent_pair_zero_covariance():
     mu = np.array([0.3, -0.7])
     Sigma = np.array([[1.4, 0.0], [0.0, 0.6]])
-    new_mu, new_Sigma = exact_relu_k2_covariance_np(mu, Sigma)
+    new_mu, new_Sigma = exact_relu_covariance_np(mu, Sigma)
     # E[ReLU_i ReLU_j] = E[ReLU_i] E[ReLU_j], so the covariance is exactly 0.
     assert new_Sigma[0, 1] == pytest.approx(0.0, abs=1e-13)
     assert new_Sigma[1, 0] == pytest.approx(0.0, abs=1e-13)
@@ -61,7 +60,7 @@ def test_independent_pair_zero_covariance():
 def test_zero_mean_correlated_cross_moment(rho):
     mu = np.zeros(2)
     Sigma = np.array([[1.0, rho], [rho, 1.0]])
-    new_mu, new_Sigma = exact_relu_k2_covariance_np(mu, Sigma)
+    new_mu, new_Sigma = exact_relu_covariance_np(mu, Sigma)
     cross = new_Sigma[0, 1] + new_mu[0] * new_mu[1]  # E[ReLU_i ReLU_j]
     expected = (math.sqrt(1 - rho**2) + rho * (math.pi - math.acos(rho))) / (2 * math.pi)
     assert cross == pytest.approx(expected, abs=1e-12)
@@ -76,7 +75,7 @@ def test_not_equal_to_gain_approximation():
     rho = 0.5
     mu = np.zeros(2)
     Sigma = np.array([[1.0, rho], [rho, 1.0]])
-    _new_mu, new_Sigma = exact_relu_k2_covariance_np(mu, Sigma)
+    _new_mu, new_Sigma = exact_relu_covariance_np(mu, Sigma)
     exact_cov = new_Sigma[0, 1]
 
     # The wrong approximation: Sigma_ij * c_i * c_j with c = Phi(alpha) = Phi(0) = 0.5.
@@ -88,12 +87,12 @@ def test_not_equal_to_gain_approximation():
     exact_expected = cross - INV_SQRT_2PI**2
     assert exact_cov == pytest.approx(exact_expected, abs=1e-12)
 
-    # Cross-check against the leading-order module on the SAME input: means and the
-    # exact diagonal variance agree, but the off-diagonal must differ.
-    gain_mu, gain_Sigma = relu_k2_covariance_update(torch.tensor(mu), torch.tensor(Sigma))
-    assert np.allclose(_new_mu, gain_mu.numpy(), atol=1e-12)
-    assert np.allclose(np.diag(new_Sigma), np.diag(gain_Sigma.numpy()), atol=1e-12)
-    assert abs(new_Sigma[0, 1] - gain_Sigma.numpy()[0, 1]) > 1e-3
+    # The default propagation path's off-diagonal is the leading-order gain
+    # Sigma_ij * Phi(alpha_i) * Phi(alpha_j); the exact value must differ from it.
+    from scipy.special import ndtr
+    alpha = mu / np.sqrt(np.diag(Sigma))
+    gain_offdiag = Sigma[0, 1] * ndtr(alpha[0]) * ndtr(alpha[1])
+    assert abs(exact_cov - gain_offdiag) > 1e-3
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +101,7 @@ def test_not_equal_to_gain_approximation():
 def test_deterministic_variance():
     mu = np.array([-2.0, 0.0, 3.0])
     Sigma = np.zeros((3, 3))
-    new_mu, new_Sigma = exact_relu_k2_covariance_np(mu, Sigma)
+    new_mu, new_Sigma = exact_relu_covariance_np(mu, Sigma)
     assert np.allclose(new_mu, [0.0, 0.0, 3.0], atol=1e-13)
     assert np.allclose(new_Sigma, np.zeros((3, 3)), atol=1e-13)
 
@@ -112,7 +111,7 @@ def test_one_deterministic_one_random_pair():
     # to max(mu_i, 0) * E[ReLU_j].
     mu = np.array([3.0, 0.5])
     Sigma = np.array([[0.0, 0.0], [0.0, 2.0]])  # i deterministic, j ~ N(0.5, 2)
-    new_mu, new_Sigma = exact_relu_k2_covariance_np(mu, Sigma)
+    new_mu, new_Sigma = exact_relu_covariance_np(mu, Sigma)
     mj, _s, vj = relu_moments_1d_np(np.array([0.5]), np.array([2.0]))
     assert new_mu[0] == pytest.approx(3.0, abs=1e-13)
     assert new_mu[1] == pytest.approx(mj[0], abs=1e-13)
@@ -149,7 +148,7 @@ def test_monte_carlo_cross_check(mu, Sigma):
     mc_mean = r.mean(0)
     mc_cov = np.cov(r, rowvar=False, bias=True)
 
-    new_mu, new_Sigma = exact_relu_k2_covariance_np(mu, Sigma)
+    new_mu, new_Sigma = exact_relu_covariance_np(mu, Sigma)
     assert np.allclose(new_mu, mc_mean, atol=5e-3)
     assert np.allclose(new_Sigma, mc_cov, atol=5e-3)
 
@@ -163,7 +162,7 @@ def test_symmetry_and_diagonal():
     A = rng.standard_normal((n, n))
     Sigma = A @ A.T / n + np.eye(n)  # SPD
     mu = rng.standard_normal(n)
-    new_mu, new_Sigma = exact_relu_k2_covariance_np(mu, Sigma)
+    new_mu, new_Sigma = exact_relu_covariance_np(mu, Sigma)
     assert np.allclose(new_Sigma, new_Sigma.T, atol=1e-14)
     _m, _s, v = relu_moments_1d_np(mu, np.diag(Sigma))
     assert np.allclose(np.diag(new_Sigma), v, atol=1e-12)
@@ -174,22 +173,35 @@ def test_symmetry_and_diagonal():
 # ---------------------------------------------------------------------------
 def test_negative_variance_raises():
     with pytest.raises(ValueError):
-        exact_relu_k2_covariance_np(np.array([0.0, 0.0]), np.array([[-0.5, 0.0], [0.0, 1.0]]))
+        exact_relu_covariance_np(np.array([0.0, 0.0]), np.array([[-0.5, 0.0], [0.0, 1.0]]))
 
 
 def test_invalid_correlation_raises():
     # Sigma_01 too large for the marginal variances => |rho| > 1.
     with pytest.raises(ValueError):
-        exact_relu_k2_covariance_np(np.array([0.0, 0.0]), np.array([[1.0, 2.0], [2.0, 1.0]]))
+        exact_relu_covariance_np(np.array([0.0, 0.0]), np.array([[1.0, 2.0], [2.0, 1.0]]))
 
 
 def test_tiny_roundoff_variance_clipped():
-    # A tiny negative variance from roundoff must be clipped, not raised.
+    # A tiny negative variance from roundoff must be clipped (treated deterministic),
+    # not raised; its covariances are correspondingly tiny (PSD-consistent).
     mu = np.array([0.5, -0.3])
-    Sigma = np.array([[1.0, 0.2], [0.2, -1e-14]])
-    new_mu, new_Sigma = exact_relu_k2_covariance_np(mu, Sigma)
+    Sigma = np.array([[1.0, 1e-12], [1e-12, -1e-14]])
+    new_mu, new_Sigma = exact_relu_covariance_np(mu, Sigma)
     assert np.isfinite(new_mu).all() and np.isfinite(new_Sigma).all()
-    assert new_Sigma[1, 1] == pytest.approx(0.0, abs=1e-13)  # treated deterministic
+    assert new_Sigma[1, 1] == pytest.approx(0.0, abs=1e-13)  # deterministic coord -> 0 variance
+    assert new_Sigma[0, 1] == pytest.approx(0.0, abs=1e-13)  # 0 covariance with a constant
+
+
+def test_asymmetric_sigma_raises():
+    with pytest.raises(ValueError):
+        exact_relu_covariance_np(np.array([0.0, 0.0]), np.array([[1.0, 0.3], [0.1, 1.0]]))
+
+
+def test_deterministic_with_nonzero_covariance_raises():
+    # var_1 ~ 0 but a sizeable covariance to coord 0 is not a valid (PSD) covariance.
+    with pytest.raises(ValueError):
+        exact_relu_covariance_np(np.array([0.0, 0.0]), np.array([[1.0, 0.2], [0.2, 0.0]]))
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +212,7 @@ def test_perfect_correlation_limit_matches_mc():
     # rho = +1 exactly (rank-1 covariance).
     si, sj = 1.1, 0.7
     Sigma = np.array([[si * si, si * sj], [si * sj, sj * sj]])
-    new_mu, new_Sigma = exact_relu_k2_covariance_np(mu, Sigma)
+    new_mu, new_Sigma = exact_relu_covariance_np(mu, Sigma)
     assert np.isfinite(new_Sigma).all()
     rng = np.random.default_rng(2)
     N = 4_000_000
@@ -219,7 +231,7 @@ def test_torch_wrapper_dtype_device():
     mu = torch.tensor([0.1, -0.2, 0.7], dtype=torch.float32)
     A = torch.randn(3, 3, dtype=torch.float32)
     Sigma = (A @ A.T) / 3 + torch.eye(3, dtype=torch.float32)
-    new_mu, new_Sigma = exact_relu_k2_covariance_torch(mu, Sigma)
+    new_mu, new_Sigma = exact_relu_covariance_torch(mu, Sigma)
     assert new_mu.dtype == torch.float32 and new_Sigma.dtype == torch.float32
     assert new_mu.device == mu.device and new_Sigma.device == Sigma.device
     assert torch.allclose(new_Sigma, new_Sigma.T, atol=1e-5)
@@ -246,7 +258,7 @@ def test_kprop_routes_to_exact_bivariate():
     Sigma = K_z1[2].to_tensor()
 
     K_out = kprop.relu_kprop(K_z1, k_max=2, kind=Kind.SIMPLE, exact_relu_cov=True)
-    exp_mu, exp_Sigma = exact_relu_k2_covariance_torch(mu, Sigma)
+    exp_mu, exp_Sigma = exact_relu_covariance_torch(mu, Sigma)
     assert torch.allclose(K_out[1].to_tensor(), exp_mu, atol=1e-10)
     assert torch.allclose(K_out[2].to_tensor(), exp_Sigma, atol=1e-10)
     # output contract: identity metric and r == 0
@@ -254,25 +266,17 @@ def test_kprop_routes_to_exact_bivariate():
     assert K_out[1].has_identity_metric() and K_out[2].has_identity_metric()
 
 
-def test_exact_cov_differs_from_gain_offdiagonal():
-    # Same input: the exact-bivariate off-diagonal must differ from the leading-order
-    # gain path, while the mean and the exact diagonal variance agree.
+def test_exact_cov_differs_from_approx_k2_offdiagonal():
+    # The exact-bivariate covariance must differ from the DEFAULT (approximate) k=2
+    # propagation off-diagonal, while the mean and the exact diagonal variance agree.
     K_z1 = _k2_input_after_linear()
     cov = kprop.relu_kprop(K_z1, k_max=2, kind=Kind.SIMPLE, exact_relu_cov=True)
-    gain = kprop.relu_kprop(K_z1, k_max=2, kind=Kind.SIMPLE, exact_relu_k2=True)
-    assert torch.allclose(cov[1].to_tensor(), gain[1].to_tensor(), atol=1e-10)  # means agree
-    Sc, Sg = cov[2].to_tensor(), gain[2].to_tensor()
-    assert torch.allclose(torch.diagonal(Sc), torch.diagonal(Sg), atol=1e-10)   # diagonals agree
+    approx = kprop.relu_kprop(K_z1, k_max=2, kind=Kind.SIMPLE)  # default = approximate k=2
+    assert torch.allclose(cov[1].to_tensor(), approx[1].to_tensor(), atol=1e-9)  # means agree
+    Sc, Sa = cov[2].to_tensor(), approx[2].to_tensor()
+    assert torch.allclose(torch.diagonal(Sc), torch.diagonal(Sa), atol=1e-9)     # diagonals agree
     off = ~torch.eye(Sc.shape[0], dtype=torch.bool)
-    assert (Sc[off] - Sg[off]).abs().max() > 1e-6                               # off-diagonals differ
-
-
-def test_exact_cov_precedence_over_gain():
-    # When both flags are set, the exact bivariate path wins.
-    K_z1 = _k2_input_after_linear()
-    both = kprop.relu_kprop(K_z1, k_max=2, kind=Kind.SIMPLE, exact_relu_k2=True, exact_relu_cov=True)
-    only_cov = kprop.relu_kprop(K_z1, k_max=2, kind=Kind.SIMPLE, exact_relu_cov=True)
-    assert torch.allclose(both[2].to_tensor(), only_cov[2].to_tensor(), atol=1e-12)
+    assert (Sc[off] - Sa[off]).abs().max() > 1e-6                                 # off-diagonals differ
 
 
 def test_exact_cov_noop_for_non_relu_and_k3():
@@ -309,14 +313,14 @@ def test_mlp_kprop_single_hidden_layer_is_exact():
     assert abs(cp - mc) < 6.0 * stderr
 
 
-def test_mlp_kprop_deep_differs_from_gain():
+def test_mlp_kprop_deep_differs_from_approx_k2():
     # Two hidden layers: the exact off-diagonal covariance feeds the next layer's
-    # variance, so the end-to-end mean differs from the leading-order gain path.
+    # variance, so the end-to-end mean differs from the default (approximate) k=2.
     torch.manual_seed(0)
     n = 24
     mlp = MLP(input_dim=n, hidden_dim=n, output_dim=4, num_layers=3)
     K_in = {1: torch.zeros(n), 2: torch.eye(n)}
     cp_cov = kprop.mlp_kprop(mlp, K_in, k_max=2, kind=Kind.SIMPLE, exact_relu_cov=True)[1].to_tensor()
-    cp_gain = kprop.mlp_kprop(mlp, K_in, k_max=2, kind=Kind.SIMPLE, exact_relu_k2=True)[1].to_tensor()
+    cp_approx = kprop.mlp_kprop(mlp, K_in, k_max=2, kind=Kind.SIMPLE)[1].to_tensor()
     assert torch.isfinite(cp_cov).all()
-    assert (cp_cov - cp_gain).abs().max() > 1e-6
+    assert (cp_cov - cp_approx).abs().max() > 1e-6
