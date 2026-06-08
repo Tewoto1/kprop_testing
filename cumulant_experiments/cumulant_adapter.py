@@ -65,8 +65,12 @@ from src.mlp_kprop.wick import WICK_COEF_D
 
 logger = logging.getLogger("cumulant_adapter")
 
-# Hard cap: k_max above 3 blows up memory/time at large width on CPU.
-MAX_KMAX = 3
+# NOTE: there is no longer a hard cap on k_max. Larger k_max is more accurate but
+# costs ~O(n^{k_max}) memory/time, so it can OOM at large width on a small machine
+# (k_max=4 at width 1024 OOM'd a CPU box during development). On a GPU box (e.g.
+# Colab) higher k_max is fine. `factor` is only supported for k_max in {3,4}; for
+# any other k_max it is silently disabled (see _normalize_config).
+SUPPORTED_FACTOR_KMAX = (3, 4)
 
 KIND_BY_NAME = {
     "simple": Kind.SIMPLE,
@@ -85,27 +89,43 @@ def default_cumulant_config() -> dict:
         "factor": True,        # factorized top cumulant; needed for k_max=3 feasibility
         "use_pK": True,        # power-cumulant path (the real algorithm; False is an ablation)
         "output_d_max": 1,     # we only need the mean (degree-1 cumulant) -> huge FLOP savings
+        "exact_relu_k2": False,  # "true"/exact closed-form ReLU at k_max==2 (see below)
     }
+
+
+# Two runnable versions of the activation step at k_max==2 with ReLU, on the SAME
+# code/model (no fork, no copy):
+#   - exact_relu_k2=False (default): the general harmonic "cumulant PROPAGATION"
+#     algorithm (an approximation).
+#   - exact_relu_k2=True: the exact closed-form scalar Gaussian-ReLU
+#     mean/covariance update ("TRUE cumulant propagation", the actual computation;
+#     see src.mlp_kprop.relu_k2_exact). Only engages for ReLU AND k_max==2.
 
 
 def _normalize_config(cumulant_config: Optional[dict]) -> dict:
     cfg = default_cumulant_config()
     if cumulant_config:
         cfg.update(cumulant_config)
-    if cfg["k_max"] > MAX_KMAX:
-        raise ValueError(
-            f"k_max={cfg['k_max']} exceeds MAX_KMAX={MAX_KMAX}; this OOMs at large width on CPU."
-        )
     if cfg["k_max"] < 1:
         raise ValueError("k_max must be >= 1")
     if isinstance(cfg["kind"], str):
         cfg["kind"] = cfg["kind"].lower()
         if cfg["kind"] not in KIND_BY_NAME:
             raise ValueError(f"Unknown kind {cfg['kind']!r}; choose from {list(KIND_BY_NAME)}")
-    # factor is only supported/meaningful for k_max in {3,4}; harmless otherwise.
-    if cfg["factor"] and cfg["k_max"] < 3:
+    # `factor` is only implemented for k_max in {3,4}; disable it (with a heads-up)
+    # for any other k_max so the real mlp_kprop doesn't raise NotImplementedError.
+    if cfg["factor"] and cfg["k_max"] not in SUPPORTED_FACTOR_KMAX:
         cfg = dict(cfg)
         cfg["factor"] = False
+        if cfg["k_max"] > 4:
+            logger.warning("factor=True is only supported for k_max in {3,4}; disabling factor "
+                           "for k_max=%d (expect higher memory/time).", cfg["k_max"])
+    # The exact closed-form ReLU path only engages for ReLU at k_max==2; warn if
+    # requested with a different k_max so the user isn't silently running the
+    # approximate path.
+    if cfg.get("exact_relu_k2") and cfg["k_max"] != 2:
+        logger.warning("exact_relu_k2=True only takes effect at k_max==2 (got k_max=%d); "
+                       "the general (approximate) propagation path will run instead.", cfg["k_max"])
     return cfg
 
 
@@ -114,7 +134,8 @@ def config_summary(cumulant_config: dict) -> str:
     kind = cfg["kind"] if isinstance(cfg["kind"], str) else cfg["kind"].name.lower()
     return (
         f"k_max={cfg['k_max']},kind={kind},use_avg_metric={cfg['use_avg_metric']},"
-        f"factor={cfg['factor']},use_pK={cfg['use_pK']},output_d_max={cfg['output_d_max']}"
+        f"factor={cfg['factor']},use_pK={cfg['use_pK']},output_d_max={cfg['output_d_max']},"
+        f"exact_relu_k2={cfg.get('exact_relu_k2', False)}"
     )
 
 
@@ -161,8 +182,15 @@ def run_cumulant_propagation_from_model(
     if model.layernorm:
         raise NotImplementedError("cumulant propagation does not support layernorm")
 
-    # Cumulant propagation runs in double precision; move a float64 copy onto device.
-    model = model.to(device=device, dtype=torch.float64)
+    # Cumulant propagation runs in double precision. We operate on a DEEP COPY cast
+    # to float64 so the caller's model is left untouched -- important for the GPU
+    # path, where training/Monte-Carlo keep the model in float32 (much faster) while
+    # kprop still gets a faithful float64 copy. (A bare model.to(float64) would
+    # mutate the caller's params in place.)
+    import copy
+    needs_copy = (next(model.parameters()).dtype != torch.float64) or \
+                 (str(next(model.parameters()).device) != str(torch.device(device)))
+    model = (copy.deepcopy(model) if needs_copy else model).to(device=device, dtype=torch.float64)
     model.eval()
 
     # --- 1. Extract weights/biases and verify orientation ---------------------
@@ -213,6 +241,7 @@ def run_cumulant_propagation_from_model(
         factor=cfg["factor"],
         use_pK=cfg["use_pK"],
         output_d_max=cfg["output_d_max"],
+        exact_relu_k2=cfg.get("exact_relu_k2", False),
     )
 
     # --- 4. Extract the predicted output mean (degree-1 cumulant = mean) ------

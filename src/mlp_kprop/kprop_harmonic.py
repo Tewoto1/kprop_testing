@@ -254,6 +254,19 @@ def linear_kprop(
     return WK
 
 
+def _is_relu_wick_coef(nonlin_wick_coef: Callable) -> bool:
+    """Whether ``nonlin_wick_coef`` is the ReLU Wick-coefficient function.
+
+    Uses object identity, with a ``__name__`` fallback so the check is robust to
+    the repo's dual import paths (``src.mlp_kprop.wick`` vs ``mlp_kprop.wick``
+    are distinct module objects, hence distinct ``relu_wick_coef`` functions).
+    """
+    return (
+        nonlin_wick_coef is relu_wick_coef
+        or getattr(nonlin_wick_coef, "__name__", None) == "relu_wick_coef"
+    )
+
+
 def nonlin_kprop(
     K_in: HTower,
     nonlin_wick_coef: Callable[[float, float, int, int], float],
@@ -261,6 +274,7 @@ def nonlin_kprop(
     kind: Kind = SIMPLE,
     use_pK: bool = True,
     factor: bool = False,
+    exact_relu_k2: bool = False,
 ) -> HTower:
     """
     Propagate cumulants through nonlinearity.
@@ -274,10 +288,22 @@ def nonlin_kprop(
         nonlin_wick_coef: 1d Wick coefficients wrt a Gaussian. (mean, var, k, p) -> E_{Z~N(mean,var)}[∂^k nonlin(Z)^p]
         factor: Use a factorized representation for the top-degree cumulant.
             Only supported for k_max=3 or 4.
+        exact_relu_k2: For the ReLU nonlinearity at k_max==2 ONLY, use the exact
+            closed-form scalar Gaussian-ReLU mean/covariance update
+            (``src.mlp_kprop.relu_k2_exact``) instead of the harmonic /
+            power-cumulant expansion. Ignored for any other nonlinearity or k_max
+            (so the general algorithm is untouched). See that module for the
+            formulas; the per-coordinate marginals become exact.
 
     Returns:
         K_out: Output cumulants (with identity metric)
     """
+    # Exact closed-form ReLU covariance propagation (opt-in "true" path). Strictly
+    # gated to ReLU + k_max==2; everything else falls through to the general code.
+    if exact_relu_k2 and k_max == 2 and _is_relu_wick_coef(nonlin_wick_coef):
+        from src.mlp_kprop.relu_k2_exact import relu_k2_exact_kprop
+        return relu_k2_exact_kprop(K_in)
+
     if not use_pK and kind != BASE:
         # TODO: If we really want to, we can ablate use_pK separately from kind=BASE
         # by computing dslices of the nonlin expansion using some block-merging logic
@@ -386,9 +412,9 @@ def nonlin_kprop(
         K_out[d] = DS_harmonic_proj(K_d_ds, r_x)
     return K_out
 
-def relu_kprop(K_in: HTower, k_max: int, kind: Kind=SIMPLE) -> HTower:
+def relu_kprop(K_in: HTower, k_max: int, kind: Kind=SIMPLE, exact_relu_k2: bool = False) -> HTower:
     return nonlin_kprop(
-        K_in, nonlin_wick_coef=relu_wick_coef, k_max=k_max, kind=kind
+        K_in, nonlin_wick_coef=relu_wick_coef, k_max=k_max, kind=kind, exact_relu_k2=exact_relu_k2
     )
 
 def poly_kprop(
@@ -438,6 +464,7 @@ def mlp_kprop(
     use_pK: bool = True,
     up_to_layer: Optional[str] = None,
     output_d_max: Optional[int] = None,
+    exact_relu_k2: bool = False,
 ) -> HTower | dict[str, HTower]:
     """
     Cumulant propagation through MLP layers.
@@ -459,6 +486,10 @@ def mlp_kprop(
             Only supported for k_max=3 or 4.
         use_pK: Whether to use pK_to_K logic in nonlinear expansion instead of directly computing K.
             (use_pK=False is only for ablation studies; it doesn't get good MSE.)
+        exact_relu_k2: For ReLU layers at k_max==2 ONLY, use the exact closed-form
+            scalar Gaussian-ReLU mean/covariance update instead of the harmonic
+            expansion (see nonlin_kprop). No effect for other nonlinearities or
+            k_max, so the general algorithm is preserved.
         up_to_layer: Output cumulants up to and including this layer.
             Takes a string f'pre{l}' or f'act{l}', interpreted as going up to the preactivation
             or activation labeled l, respectively. None means go through all layers.
@@ -502,6 +533,7 @@ def mlp_kprop(
                 kind=kind,
                 use_pK=use_pK,
                 factor=factor,
+                exact_relu_k2=exact_relu_k2,
             )
             if output_all:
                 K_by_layer[f"act{l}"] = clone_tower(K, d_max=output_d_max)

@@ -22,7 +22,8 @@ so the repo root must be on sys.path -- this script inserts it automatically):
         --outdir results/cumulant_train_to_zero
 
 Useful flags: --skip-training (only initial models), --no-plots, --debug,
---no-sanity, --k-max {1,2,3} (3 is the hard maximum -- higher OOMs at width 1024),
+--no-sanity, --k-max N (budget K, no hard cap; higher = more accurate but
+~O(n^k_max) memory/time, so large k_max can OOM at width 1024 on a small box),
 --use-avg-metric (use init-time E[WW^T] metric instead of the exact metric).
 
 Outputs
@@ -159,12 +160,18 @@ def main():
     p.add_argument("--loss-tol", type=float, default=0.0, help="early-stop training when loss < this (0 = never)")
 
     # cumulant propagation config
-    p.add_argument("--k-max", type=int, default=3, choices=[1, 2, 3], help="budget K; 3 is the hard max (higher OOMs)")
+    p.add_argument("--k-max", type=int, default=3,
+                   help="budget K (>=1). Higher = more accurate but ~O(n^k_max) memory/time; "
+                        "k_max>=5 can OOM at large width on a small machine.")
     p.add_argument("--kind", type=str, default="simple", choices=["simple", "augment", "old", "base"])
     p.add_argument("--use-avg-metric", action="store_true",
                    help="use init-time E[WW^T] metric instead of the exact metric from actual weights")
     p.add_argument("--no-factor", dest="factor", action="store_false")
     p.set_defaults(factor=True)
+    p.add_argument("--exact-relu-k2", action="store_true",
+                   help="use the exact closed-form ('true') ReLU mean/covariance update at "
+                        "k_max==2 instead of the approximate harmonic propagation "
+                        "(only takes effect with --k-max 2 and a ReLU activation)")
 
     p.add_argument("--device", type=str, default=("cuda" if torch.cuda.is_available() else "cpu"))
     p.add_argument("--outdir", type=str, default="results/cumulant_train_to_zero")
@@ -195,6 +202,7 @@ def main():
         "factor": args.factor,
         "use_pK": True,
         "output_d_max": 1,
+        "exact_relu_k2": args.exact_relu_k2,
     }
     cfg_summary = config_summary(cumulant_config)
     num_layers = args.hidden_depth + 1
