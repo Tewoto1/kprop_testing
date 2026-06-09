@@ -65,8 +65,10 @@ conclusion does not hinge on a single task:
    *moderate* tolerance so the output stays large enough that the comparison is not
    swamped by Monte-Carlo / floating-point noise.
 2. **`halfspace`** — train each output component to classify whether the input lies
-   in a random affine half-space `{x : w_j·x > b_j}` (MSE to the 0/1 indicator); a
-   genuinely different learned weight structure (per-component mean → `Phi(−b_j)`).
+   in a random half-space `{x : w_j·x > b_j}` (MSE to the 0/1 indicator); a
+   genuinely different learned weight structure. (Models are trained with **no
+   bias** — see §3 — so the ReLU net is positively homogeneous and fits the best
+   homogeneous approximation of the half-space.)
 
 For each `(width n, seed, regime)` (with `input_dim = n`) we measure the
 MC-variance-debiased error of the propagated mean and its scaling with `n`, for
@@ -207,7 +209,7 @@ from cumulant_experiments.model_utils import make_mlp, train_model_to_zero, trai
 # ---- Architecture ----------------------------------------------------------
 HIDDEN_DEPTH = 2        # >=2 so the off-diagonal covariance actually matters (depth 1 ignores it)
 ACTIVATION   = "relu"   # the exact path applies to ReLU
-USE_BIAS     = True
+USE_BIAS     = False    # train with NO bias parameters (biases identically 0 throughout training)
 OUTPUT_DIM   = 64       # vector output (and # of random half-spaces for the halfspace task)
 
 # ---- The two methods (both k_max=2; only exact_relu_cov differs) -----------
@@ -231,7 +233,10 @@ TRAIN_STEPS    = 8000         # both training regimes
 # so the tiny trained output is not swamped by MC / float64 numerical error. Raise (e.g. 1e-5/1e-4)
 # to leave an even larger output; lower (1e-8) to push kprop harder (noisier comparison).
 TRAIN_LOSS_TOL = 1e-6
-HALFSPACE_OFFSET_STD = 1.0    # random affine offset b_j ~ N(0, this^2); per-component mean -> Phi(-b_j)
+HALFSPACE_OFFSET_STD = 1.0    # random affine offset b_j ~ N(0, this^2). NOTE: with USE_BIAS=False the
+                              # ReLU MLP is positively homogeneous and cannot represent an affine offset,
+                              # so it fits the best homogeneous approximation. Set 0.0 for through-origin
+                              # half-spaces {x: w_j.x > 0} (a matched, fully learnable target).
 BATCH_SIZE     = 1024
 LR             = 1e-3
 
