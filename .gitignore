@@ -1,7 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Environments
 .venv/
-*.egg-info
-__pycache__
+venv/
+
+# Editors / OS
 .vscode/
-nohup_*
-.codex
+.idea/
+.DS_Store
+
+# Agent tooling
 .claude
+.codex
+nohup_*
+
+# Experiment outputs (regenerable; the baseline lives in colab_notebooks/)
+results/
+
+# kprop FLOP-polynomial cache (regenerable)
+Mecha_preds/cumulants/kprop/_flop_cache/
+
+# Notebook repo-clone scratch
+_repo_clone/
+
+# NOTE: checkpoints/*.pt ARE tracked on purpose -- they are the "one learned case".
