@@ -74,6 +74,8 @@ def train_grid(task: str, *, widths: Sequence[int], depths: Sequence[int],
 
 
 def main():
+    # optimization defaults come straight from TrainConfig -- ONE source of truth
+    d = TrainConfig()
     p = argparse.ArgumentParser(description="Train MLPs on a task over a depth x width grid.")
     p.add_argument("--task", choices=["zero", "halfspace", "distill"], default="zero")
     p.add_argument("--widths", type=int, nargs="+", default=[64, 128, 256])
@@ -85,17 +87,16 @@ def main():
     p.add_argument("--bias", action="store_true", help="enable biases (off by default)")
     p.add_argument("--offset-std", type=float, default=1.0, help="halfspace: offset b ~ N(0, this^2)")
     p.add_argument("--teacher-seed", type=int, default=None, help="distill: teacher init seed")
-
-    p.add_argument("--steps", type=int, default=8000)
-    p.add_argument("--batch-size", type=int, default=4096)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--weight-decay", type=float, default=0.0)
-    p.add_argument("--optimizer", default="adam", choices=["adam", "adamw", "sgd"])
-    p.add_argument("--grad-clip", type=float, default=None)
-    p.add_argument("--checkpoint-mode", default="final", choices=["none", "final", "periodic", "all"])
-    p.add_argument("--checkpoint-every", type=int, default=1000)
+    p.add_argument("--steps", type=int, default=d.steps)
+    p.add_argument("--batch-size", type=int, default=d.batch_size)
+    p.add_argument("--lr", type=float, default=d.lr)
+    p.add_argument("--weight-decay", type=float, default=d.weight_decay)
+    p.add_argument("--optimizer", default=d.optimizer, choices=["adam", "adamw", "sgd"])
+    p.add_argument("--grad-clip", type=float, default=d.grad_clip)
+    p.add_argument("--checkpoint-mode", default=d.checkpoint_mode, choices=["none", "final", "periodic", "all"])
+    p.add_argument("--checkpoint-every", type=int, default=d.checkpoint_every)
     p.add_argument("--checkpoint-dir", default="checkpoints")
-    p.add_argument("--device", default="auto")
+    p.add_argument("--device", default=d.device)
     args = p.parse_args()
 
     train_cfg = TrainConfig(steps=args.steps, batch_size=args.batch_size, lr=args.lr,

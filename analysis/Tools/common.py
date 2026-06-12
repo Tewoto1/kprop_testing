@@ -1,7 +1,7 @@
 """analysis/common.py -- shared primitives for the analysis tools.
 
-Two groups, used by both the general circuit tools (`pca`, `ablation`, `patching`,
-`attribution`, `probing`) and the study-specific `trained_to_0` tools:
+Two groups, used by the circuit tools (`pca`, `ablation`, `patching`,
+`attribution`, `weight_structure`):
 
   * activation collection: `collect_activations` (forward once, return every
     layer's pre/post on CPU) and `run_with_intervention` (a hook-free forward that

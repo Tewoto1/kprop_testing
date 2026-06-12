@@ -12,26 +12,16 @@ Mirrors the conventions of the other notebook generators in this folder:
   * a §0 setup cell that finds-or-clones the repo (paste your GitHub URL),
   * everything in float64, results written under results/weight_structure/.
 
-Run:  python notebooks/build_weight_structure_notebook.py
+Run:  python colab_notebooks/mech_interp_on_trained_to_0/build_weight_structure_notebook.py
 """
-import json
 import os
+import sys
 
-cells = []
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _nb import NotebookBuilder
 
-
-def _cell_id():
-    return f"cell-{len(cells):02d}"
-
-
-def md(text):
-    cells.append({"cell_type": "markdown", "id": _cell_id(), "metadata": {},
-                  "source": text.splitlines(keepends=True)})
-
-
-def code(text):
-    cells.append({"cell_type": "code", "id": _cell_id(), "metadata": {}, "execution_count": None,
-                  "outputs": [], "source": text.strip("\n").splitlines(keepends=True)})
+nb = NotebookBuilder()
+md, code = nb.md, nb.code
 
 
 # =============================================================================
@@ -77,7 +67,7 @@ md(r"""## 0 · Setup — find or clone the repo
 Paste your GitHub URL into `REPO_URL` (or point `LOCAL_REPO_DIR` at a local / Drive
 checkout). The checkout must contain the `model/`, `tasks/`, `training/` and
 `analysis/` packages and the tracked zero-task checkpoints under
-`checkpoints/trained_to_0_checkpoints/`.""")
+`checkpoints/weight_analysis_checkpoints/`.""")
 
 code(r"""
 # ----------------------------- EDIT THIS -----------------------------------
@@ -157,7 +147,7 @@ SEED          = _env_int("WS_SEED", 0)
 RESULTS_DIR = os.path.join(REPO_DIR, "results", "weight_structure")
 FIG_DIR     = os.path.join(RESULTS_DIR, "figures")
 TAB_DIR     = os.path.join(RESULTS_DIR, "tables")
-CKPT_DIR    = os.path.join(REPO_DIR, "checkpoints", "weight_structure")
+CKPT_DIR    = os.path.join(REPO_DIR, "checkpoints", "weight_analysis_checkpoints")
 for d in (FIG_DIR, TAB_DIR, CKPT_DIR):
     os.makedirs(d, exist_ok=True)
 
@@ -460,7 +450,7 @@ We study three targets:
 
 Zero checkpoints are loaded from the repo. Halfspace / max / a bias-on zero model / a
 training-trajectory run are trained here **only if their checkpoints are missing**
-(saved under `checkpoints/weight_structure/`). Training is light — these are tiny MLPs.""")
+(saved under `checkpoints/weight_analysis_checkpoints/`). Training is light — these are tiny MLPs.""")
 
 code(r"""
 import glob
@@ -500,7 +490,7 @@ def _train_if_missing(run_name, task_builder, *, width, depth, bias=False,
 REGISTRY = []
 
 # zero checkpoints already in the repo
-for p in sorted(glob.glob(os.path.join(REPO_DIR, "checkpoints", "trained_to_0_checkpoints", "zero_*_final.pt"))):
+for p in sorted(glob.glob(os.path.join(REPO_DIR, "checkpoints", "weight_analysis_checkpoints", "zero_*_final.pt"))):
     m, _ = MLP.load(p)
     REGISTRY.append({"model_id": os.path.basename(p).replace("_final.pt", ""),
                      "target_type": "zero", "ckpt": p, "depth": m.cfg.depth,
@@ -1081,18 +1071,4 @@ md(r"""### How to read the results
   and `wᵀμ` stays centered (the weight-mean mechanism is replaced by a bias mechanism).""")
 
 # =============================================================================
-nb = {
-    "cells": cells,
-    "metadata": {
-        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-        "language_info": {"name": "python", "version": "3.12"},
-        "colab": {"provenance": []},
-    },
-    "nbformat": 4,
-    "nbformat_minor": 5,
-}
-
-out = os.path.join(os.path.dirname(__file__), "weight_structure_vs_randomness.ipynb")
-with open(out, "w") as f:
-    json.dump(nb, f, indent=1)
-print("wrote", out, "with", len(cells), "cells")
+nb.save(os.path.join(os.path.dirname(__file__), "weight_structure_vs_randomness.ipynb"))

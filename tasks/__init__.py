@@ -1,6 +1,6 @@
 """tasks -- pure task definitions (data + loss) for the trained-case study.
 
-Each task draws `(x, y)` batches and scores a model with `loss` (MSE by default).
+Each task draws `(x, y)` batches and scores a model with its own `loss`.
 Training itself lives in the `training` package, which runs any of these tasks.
 
 Tasks:

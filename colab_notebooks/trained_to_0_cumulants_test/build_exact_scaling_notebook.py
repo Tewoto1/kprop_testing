@@ -15,26 +15,16 @@ It runs on the unified codebase: build a `model.MLP`, train it with `training`,
 and predict its mean with `Mecha_preds.cumulants.run_cumulants` (a black box -- we
 only flip `exact_relu_cov`). §2 prints the source files.
 
-Run:  python colab_notebooks/build_exact_scaling_notebook.py
+Run:  python "colab_notebooks/trained_to_0_cumulants_test/build_exact_scaling_notebook.py"
 """
-import json
 import os
+import sys
 
-cells = []
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _nb import NotebookBuilder
 
-
-def _cell_id():
-    return f"cell-{len(cells):02d}"
-
-
-def md(text):
-    cells.append({"cell_type": "markdown", "id": _cell_id(), "metadata": {},
-                  "source": text.splitlines(keepends=True)})
-
-
-def code(text):
-    cells.append({"cell_type": "code", "id": _cell_id(), "metadata": {}, "execution_count": None,
-                  "outputs": [], "source": text.strip("\n").splitlines(keepends=True)})
+nb = NotebookBuilder()
+md, code = nb.md, nb.code
 
 
 # =============================================================================
@@ -396,18 +386,4 @@ seeds × 2 phases × 12000-step training × 2M MC; exact path CPU/scipy at width
 — use a GPU and trim widths/seeds for a first pass.
 """)
 
-nb = {
-    "cells": cells,
-    "metadata": {
-        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-        "language_info": {"name": "python", "version": "3.12"},
-        "colab": {"provenance": []},
-    },
-    "nbformat": 4,
-    "nbformat_minor": 5,
-}
-
-out = os.path.join(os.path.dirname(__file__), "exact_relu_k2_width_scaling_colab.ipynb")
-with open(out, "w") as f:
-    json.dump(nb, f, indent=1)
-print("wrote", out, "with", len(cells), "cells")
+nb.save(os.path.join(os.path.dirname(__file__), "exact_relu_k2_width_scaling_colab.ipynb"))

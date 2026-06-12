@@ -53,3 +53,7 @@ class DistillTask(Task):
         with torch.no_grad():
             y = self.teacher(x)
         return x, y
+
+    def loss(self, output, target):
+        """MSE of the student output against the teacher's output."""
+        return torch.mean((output - target) ** 2)

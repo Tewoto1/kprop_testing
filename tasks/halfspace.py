@@ -44,3 +44,7 @@ class HalfspaceTask(Task):
         w = self.w.to(device)
         y = (x @ w - self.b > 0).to(x.dtype).unsqueeze(1)   # (batch, 1) in {0,1}
         return x, y
+
+    def loss(self, output, target):
+        """MSE of the output against the 0/1 half-space indicator."""
+        return torch.mean((output - target) ** 2)

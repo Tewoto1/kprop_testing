@@ -42,25 +42,28 @@ class TrainConfig:
 
 
 def _make_optimizer(model, cfg: TrainConfig):
+    params = [p for p in model.parameters() if p.requires_grad]   # skip frozen weights
     name = cfg.optimizer.lower()
     if name == "adam":
-        return torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        return torch.optim.Adam(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     if name == "adamw":
-        return torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        return torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     if name == "sgd":
-        return torch.optim.SGD(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        return torch.optim.SGD(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     raise ValueError(f"unknown optimizer {cfg.optimizer!r}")
 
 
 class Trainer:
     def __init__(self, model: MLP, task: Task, cfg: TrainConfig,
-                 checkpoint_dir: str = "checkpoints", run_name: str = "run"):
+                 checkpoint_dir: str = "checkpoints", run_name: str = "run",
+                 extra_meta: Optional[dict] = None):
         self.model = model
         self.task = task
         self.cfg = cfg
         self.device = pick_device(cfg.device)
         self.checkpoint_dir = checkpoint_dir
         self.run_name = run_name
+        self.extra_meta = extra_meta or {}
         self.history: List[Tuple[int, float]] = []
         os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -69,8 +72,10 @@ class Trainer:
         self.model.save(path, extra={
             "step": step,
             "history": self.history,
+            "final_loss": self.history[-1][1] if self.history else None,
             "train_config": asdict(self.cfg),
             "run_name": self.run_name,
+            **self.extra_meta,
         })
         return path
 

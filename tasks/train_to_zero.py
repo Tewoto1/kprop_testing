@@ -26,3 +26,7 @@ class ZeroTask(Task):
         x = torch.randn(batch_size, self.input_dim, device=device) * self.input_std
         y = torch.zeros(batch_size, self.output_dim, device=device)
         return x, y
+
+    def loss(self, output, target):
+        """E[||f(x)||^2]: MSE of the output against the zero target."""
+        return torch.mean((output - target) ** 2)
