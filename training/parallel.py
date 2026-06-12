@@ -16,10 +16,11 @@ generator for all models), which is irrelevant for fresh-sampled (infinite-data)
 tasks like ZeroTask.
 
 Early stopping is per model: every `cfg.tol_check_every` steps the per-model
-losses are synced once; a model that first drops below `cfg.loss_tol` has its
-parameters snapshotted at that step (training continues for the stragglers, but
-the returned/saved state of a converged model is its at-tol snapshot -- it is NOT
-trained further). The loop ends when all models converged or `cfg.steps` is hit.
+losses are synced once; a model that has been below `cfg.loss_tol` for
+`cfg.tol_patience` CONSECUTIVE checks (one above-tol check resets its count) has
+its parameters snapshotted at that step (training continues for the stragglers,
+but the returned/saved state of a converged model is its at-tol snapshot -- it is
+NOT trained further). The loop ends when all models converged or `cfg.steps` is hit.
 
 Use `train_many` (falls back to sequential `Trainer`s if torch.func/vmap is
 unavailable on the device) or `train_ensemble` directly.
@@ -88,6 +89,7 @@ def train_ensemble(models: Sequence[MLP], task: Task, cfg: TrainConfig, *,
     histories: List[List[Tuple[int, float]]] = [[] for _ in range(n_models)]
     done_step: List[Optional[int]] = [None] * n_models
     snapshots: List[Optional[dict]] = [None] * n_models
+    below = [0] * n_models                       # per-model consecutive sub-tol checks
     tol_every = max(1, cfg.tol_check_every) if cfg.loss_tol > 0.0 else 0
     t0, last_step = time.time(), cfg.steps
 
@@ -118,11 +120,13 @@ def train_ensemble(models: Sequence[MLP], task: Task, cfg: TrainConfig, *,
                           f"[ensemble x{n_models}] step {step}: all converged", flush=True)
             if cfg.loss_tol > 0.0:
                 for i in range(n_models):
-                    if done_step[i] is None and lv[i] < cfg.loss_tol:
-                        done_step[i] = step
-                        snapshots[i] = _slice_state(params, buffers, i)
-                        if not histories[i] or histories[i][-1][0] != step:
-                            histories[i].append((step, lv[i]))
+                    if done_step[i] is None:
+                        below[i] = below[i] + 1 if lv[i] < cfg.loss_tol else 0
+                        if below[i] >= max(1, cfg.tol_patience):   # stably below tol
+                            done_step[i] = step
+                            snapshots[i] = _slice_state(params, buffers, i)
+                            if not histories[i] or histories[i][-1][0] != step:
+                                histories[i].append((step, lv[i]))
                 if all(s is not None for s in done_step):
                     last_step = step
                     break

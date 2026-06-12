@@ -222,8 +222,17 @@ PHASES = ["initial", "train_to_zero"]
 # models trained under a different regime.
 LOSS_TOL   = 1e-5
 MAX_STEPS  = 200_000
+TOL_CHECK_EVERY = 1   # check the stop criterion EVERY step. ZeroTask converges so fast
+                      # (1e-3 -> 1e-9 inside 50 steps at large width with lr=1e-3) that
+                      # sparse checks overshoot far below LOSS_TOL and un-match the
+                      # widths' loss levels. Runs are short, so the per-step sync is free.
+TOL_PATIENCE = 25     # stop only after the loss has been below LOSS_TOL for this many
+                      # CONSECUTIVE steps (one above-tol step resets the count): the stop
+                      # fires when the loss has STABILIZED below tol, not on one lucky batch.
 BATCH_SIZE = 1024
-LR         = 1e-3
+LR         = 1e-4     # gentle rate so the loss GLIDES into the tolerance instead of
+                      # crashing orders of magnitude past it between two checks
+LOG_EVERY  = 10       # fine-grained history -> usable loss curves in §5b
 CKPT_DIR   = "checkpoints/kprop_tol_checkpoints"   # THIS notebook's checkpoint folder
 TOL_TAG    = int(round(-math.log10(LOSS_TOL)))   # 1e-5 -> 5, goes into the run name
 
@@ -313,6 +322,7 @@ def evaluate(model, in_dim, width, seed, phase, final_loss, mc_batch, rows):
     print(f"  n={width:4d} s={seed} {phase:14s} out_rms={st['empirical_output_rms']:.2e}{ls}{flag}")
 
 rows = []
+train_histories = {}            # (width, seed) -> [(step, loss), ...] for the §5b loss curves
 for width in WIDTHS:
     in_dim = width
     mc_batch = min(MC_BATCH, max(8192, (1 << 26) // in_dim))   # bound batch*in_dim memory at large width
@@ -329,7 +339,9 @@ for width in WIDTHS:
               for s in SEEDS]
     builds = [(lambda s=s: build_model(in_dim, width, HIDDEN_DEPTH, seed=s)) for s in SEEDS]
     tcfg   = TrainConfig(steps=MAX_STEPS, batch_size=BATCH_SIZE, lr=LR, optimizer="adamw",
-                         loss_tol=LOSS_TOL, checkpoint_mode="final", log_every=2000,
+                         loss_tol=LOSS_TOL, tol_check_every=TOL_CHECK_EVERY,
+                         tol_patience=TOL_PATIENCE, checkpoint_mode="final",
+                         log_every=LOG_EVERY,
                          device=DEVICE, dtype=str(MODEL_DTYPE).split(".")[-1])
     trained = E.get_or_train_many(paths, builds,
                                   task=ZeroTask(input_dim=in_dim, output_dim=OUTPUT_DIM),
@@ -337,10 +349,48 @@ for width in WIDTHS:
                                   map_location=DEVICE, progress=True)
     for seed, (model, payload, loaded) in zip(SEEDS, trained):
         model = model.to(device=DEVICE, dtype=MODEL_DTYPE)
+        train_histories[(width, seed)] = payload.get("history") or []
         print(f"    seed {seed}: {'[loaded from ckpt]' if loaded else '[trained fresh]'}")
         evaluate(model, in_dim, width, seed, "train_to_zero", E.final_loss(payload), mc_batch, rows)
 dfsc = pd.DataFrame(rows)
 dfsc.head(8)
+""")
+
+# --- Loss curves ---------------------------------------------------------------
+md(r"""## 5b. Training loss curves — did every width stop AT the tolerance?
+
+One curve per `(width, seed)` (thin lines = seeds, color = width), log-y. Every curve
+should **glide into the dashed `LOSS_TOL` line and stop just below it** — that is the
+matched regime. A curve that ends far below the line means the stop overshot (raise
+`TOL_PATIENCE` granularity / lower `LR` further); one that never reaches it hit
+`MAX_STEPS` (not converged). Markers = the saved (checkpointed) stopping point.
+""")
+
+code(r"""
+import matplotlib.cm as cm
+
+fig, ax = plt.subplots(figsize=(9.5, 5.5))
+wcolors = {w: cm.viridis(i / max(1, len(WIDTHS) - 1)) for i, w in enumerate(WIDTHS)}
+for (w_, s_), hist in sorted(train_histories.items()):
+    if not hist:
+        continue
+    steps_, losses_ = zip(*hist)
+    ax.plot(steps_, losses_, "-", color=wcolors[w_], lw=1.0, alpha=0.75)
+    ax.plot(steps_[-1], losses_[-1], "o", color=wcolors[w_], ms=5,
+            markeredgecolor="k", markeredgewidth=0.4)
+ax.axhline(LOSS_TOL, color="crimson", ls="--", lw=1.2, label=f"LOSS_TOL = {LOSS_TOL:g}")
+for w_ in WIDTHS:   # one legend entry per width
+    ax.plot([], [], "-", color=wcolors[w_], label=f"n={w_}")
+ax.set_yscale("log"); ax.set_xlabel("step"); ax.set_ylabel("per-step MSE")
+ax.set_title("train-to-tolerance loss curves (marker = saved stopping point)")
+ax.grid(True, which="both", alpha=0.3); ax.legend(fontsize=8, ncol=2)
+plt.tight_layout(); plt.show()
+
+print("final loss / LOSS_TOL ratio per run (want ~just below 1):")
+for (w_, s_), hist in sorted(train_histories.items()):
+    if hist:
+        print(f"  n={w_:4d} s={s_}: stopped step {hist[-1][0]:>6}  "
+              f"loss {hist[-1][1]:.2e}  ({hist[-1][1]/LOSS_TOL:.2f}x tol)")
 """)
 
 code(r"""

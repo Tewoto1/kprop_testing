@@ -42,6 +42,9 @@ class TrainConfig:
     grad_clip: Optional[float] = None
     loss_tol: float = 0.0              # >0: early-stop once the step loss drops below this
     tol_check_every: int = 50          # how often (in steps) the loss_tol test syncs to host
+    tol_patience: int = 1              # stop only after this many CONSECUTIVE sub-tol checks
+                                       # (a single above-tol check resets the count) -- guards
+                                       # against stopping on one lucky batch
     log_every: int = 200
     checkpoint_mode: str = "final"     # none | final | periodic | all
     checkpoint_every: int = 1000
@@ -106,6 +109,7 @@ class Trainer:
         # Syncing loss to host every step serializes the GPU (one .cpu() per step
         # blocks the launch queue). Only sync when we actually need the number:
         tol_every = max(1, cfg.tol_check_every) if cfg.loss_tol > 0.0 else 0
+        below = 0                                           # consecutive sub-tol checks
         t0 = time.time()
         for step in range(1, cfg.steps + 1):
             x, y = self.task.sample_batch(cfg.batch_size, self.device)
@@ -128,10 +132,12 @@ class Trainer:
                     if progress:
                         print(f"[{self.run_name}] step {step:>6}/{cfg.steps}  "
                               f"loss {loss_val:.3e}", flush=True)
-                if cfg.loss_tol > 0.0 and loss_val < cfg.loss_tol:
-                    if not self.history or self.history[-1][0] != step:
-                        self.history.append((step, loss_val))
-                    break
+                if cfg.loss_tol > 0.0:
+                    below = below + 1 if loss_val < cfg.loss_tol else 0
+                    if below >= max(1, cfg.tol_patience):   # stably below tol -> stop
+                        if not self.history or self.history[-1][0] != step:
+                            self.history.append((step, loss_val))
+                        break
             if cfg.checkpoint_mode in ("periodic", "all") and step % cfg.checkpoint_every == 0:
                 self._save(step, tag=f"step{step}")
 
