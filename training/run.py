@@ -97,12 +97,14 @@ def main():
     p.add_argument("--checkpoint-every", type=int, default=d.checkpoint_every)
     p.add_argument("--checkpoint-dir", default="checkpoints")
     p.add_argument("--device", default=d.device)
+    p.add_argument("--dtype", default=d.dtype, choices=["float32", "float64", "auto"],
+                   help="training dtype (float32 = repo default, GPU-fast)")
     args = p.parse_args()
 
     train_cfg = TrainConfig(steps=args.steps, batch_size=args.batch_size, lr=args.lr,
                             weight_decay=args.weight_decay, optimizer=args.optimizer,
                             grad_clip=args.grad_clip, checkpoint_every=args.checkpoint_every,
-                            device=args.device)
+                            device=args.device, dtype=args.dtype)
     train_grid(args.task, widths=args.widths, depths=args.depths, seeds=args.seeds,
                input_dim=args.input_dim, output_dim=args.output_dim, activation=args.activation,
                bias=args.bias, offset_std=args.offset_std, teacher_seed=args.teacher_seed,

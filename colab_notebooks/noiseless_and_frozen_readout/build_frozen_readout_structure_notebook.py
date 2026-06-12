@@ -55,27 +55,31 @@ Point at the repo root (must contain `model/`). Needs only `torch`/`numpy`/`pand
 """)
 nb.code(BOOTSTRAP_CELL)
 
-nb.md(r"""## 1. Config — everything comes from `experiments.py`
-Edit the sweep there (or override below). Everything runs in **float64**.
-`QUICK=True` shrinks the width sweep for a smoke test. `LOAD_EXISTING=True` is the
-repo's recycling rule: a same-named checkpoint on disk is loaded, not re-trained.
+nb.md(r"""## 1. Config — **the knobs live HERE** (probe in place)
+This cell defines the sweep; edit and re-run it directly (`experiments.py` only keeps
+the classic defaults plus naming/recycling machinery). **Precision policy:** any fresh
+*training* runs in float32 (the Trainer enforces `TrainConfig.dtype`; fast on GPU),
+while the *analysis* below (eigendecompositions, μ-alignment) is done in **float64**
+— models are cast to double after loading. `QUICK` defaults to True on a CPU-only
+machine (smoke-test sweep). `LOAD_EXISTING=True` is the repo's recycling rule: a
+same-named checkpoint on disk is loaded, not re-trained.
 """)
 nb.code(r"""
 import torch, numpy as np, pandas as pd
 import matplotlib.pyplot as plt
-torch.set_default_dtype(torch.float64)
+torch.set_default_dtype(torch.float64)   # analysis dtype (training is float32 regardless)
 
 import experiments as E
 from tasks import ZeroTask
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-QUICK  = False
+DEVICE = str(E.DEVICE)
+QUICK  = E.QUICK               # True on a CPU-only machine
 DEPTH  = 2
-WIDTHS = E.QUICK_WIDTHS if QUICK else E.WIDTHS
-SEEDS  = E.SEEDS
+WIDTHS = [32, 64, 128] if QUICK else [16, 32, 64, 128, 256, 512]   # classic: E.WIDTHS
+SEEDS  = [0]                                                       # classic: E.SEEDS
 LOAD_EXISTING = True
-STUDY  = "noiseless"           # -> checkpoints/noiseless_Layerless/
-print("depth", DEPTH, "| widths", WIDTHS, "| device", DEVICE, "| ckpts ->", E.ckpt_dir(STUDY))
+CKPT_DIR = "checkpoints/noiseless_Layerless"   # THIS notebook's checkpoint folder
+print("depth", DEPTH, "| widths", WIDTHS, "| device", DEVICE, "| ckpts ->", CKPT_DIR)
 """)
 
 nb.md(r"""## 2. Train / reload — `experiments.get_or_train`
@@ -90,7 +94,7 @@ def get_model(cond, w, seed):
             if cond == "frozen_identity" else \
             (lambda: E.build_mlp(w, DEPTH, output_dim=w, seed=seed, device=DEVICE))
     m, payload, loaded = E.get_or_train(
-        E.ckpt_path(STUDY, name), build,
+        E.ckpt_path(CKPT_DIR, name), build,
         task=ZeroTask(input_dim=w, output_dim=w),
         train_cfg=E.default_train_cfg(w, seed=seed, device=DEVICE),
         extra_meta={"condition": cond, "experiment": "B_readout_d2"},

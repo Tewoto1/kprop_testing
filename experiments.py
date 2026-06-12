@@ -8,11 +8,13 @@ Full guide: EXPERIMENTS.md. Quick map of where each kind of setting is defined:
     task / data (what the net is trained on) .... tasks/               (tasks/)
     grids, naming, checkpoint reuse ............. THIS FILE
 
-Typical notebook cell:
+Typical notebook cell (the notebook owns its CKPT_DIR; experiments.py only
+standardizes naming + recycling):
 
     import experiments as E
+    CKPT_DIR = "checkpoints/noiseless_Layerless"     # this notebook's choice
     model, payload, loaded = E.get_or_train(
-        E.ckpt_path("noiseless", E.run_name("readout-frozen_identity", depth=2, width=64)),
+        E.ckpt_path(CKPT_DIR, E.run_name("readout-frozen_identity", depth=2, width=64)),
         build=lambda: E.build_frozen_identity(64, depth=2, seed=0),
         task=ZeroTask(input_dim=64, output_dim=64),
         train_cfg=E.default_train_cfg(64),
@@ -21,6 +23,13 @@ Typical notebook cell:
 `get_or_train` is the recycling rule of this repo: if the checkpoint already
 exists it is loaded, otherwise it is trained and saved under that exact name --
 so re-running a notebook never re-trains what is already on disk.
+`get_or_train_many` is the batched version: all missing runs of one width train
+simultaneously in a single vmapped loop (training/parallel.py).
+
+Runtime policy (see the constants right below): training/inference run in
+FLOAT32 on the auto-picked DEVICE (float64 only where accuracy is the point --
+kprop internals, MC accumulators, analysis eigendecompositions); `QUICK` is True
+on a CPU-only machine so notebooks default to the small smoke-test sweep there.
 """
 from __future__ import annotations
 import glob
@@ -32,7 +41,20 @@ import torch
 
 from model import MLP, ModelConfig
 from tasks import Task
-from training import TrainConfig, Trainer
+from training import TrainConfig, Trainer, train_many
+from utils import pick_device, pick_dtype, enable_fast_matmul
+
+# ---------------------------------------------------------------------------
+# Runtime policy -- device & precision, decided ONCE here
+# ---------------------------------------------------------------------------
+# float32 is the repo's training/inference dtype (GPU tensor cores; ~10-30x faster
+# than float64 on CUDA). float64 remains opt-in where accuracy is the point:
+# kprop runs in float64 internally regardless of model dtype, MC accumulators are
+# float64, and analysis eigendecompositions cast to float64 themselves.
+DEVICE: torch.device = pick_device()           # cuda -> mps -> cpu
+DTYPE: torch.dtype = pick_dtype("auto")        # float32
+QUICK: bool = DEVICE.type == "cpu"             # no GPU -> notebooks default to the quick sweep
+enable_fast_matmul(DEVICE)                     # TF32 matmuls on CUDA (no-op elsewhere)
 
 # ---------------------------------------------------------------------------
 # Standard sweep grids -- edit here and every notebook picks it up
@@ -53,29 +75,20 @@ def batch_steps(width: int) -> Tuple[int, int]:
     return 1024, 1000
 
 def default_train_cfg(width: int, seed: int = 0, **overrides) -> TrainConfig:
-    """The standard Adam config for this repo, sized to `width`."""
+    """The standard Adam config for this repo, sized to `width` (float32, auto device)."""
     batch, steps = batch_steps(width)
     kw = dict(steps=steps, batch_size=batch, lr=LR, seed=seed)
     kw.update(overrides)
     return TrainConfig(**kw)
 
 # ---------------------------------------------------------------------------
-# Checkpoint locations & naming -- one root, one folder per study
+# Checkpoint naming -- the DIRECTORY is the notebook's choice, not a global.
+# Each notebook declares its own CKPT_DIR (e.g. "checkpoints/noiseless_Layerless")
+# in its config cell; experiments.py only standardizes file NAMING and recycling.
+# Existing folders: checkpoints/noiseless_Layerless (frozen/trainable readout +
+# meanfield), checkpoints/weight_analysis_checkpoints (halfspace/max/zerobias),
+# checkpoints/kprop_tol_checkpoints (kprop train-to-tolerance scaling).
 # ---------------------------------------------------------------------------
-CHECKPOINT_ROOT = "checkpoints"
-STUDY_DIRS: Dict[str, str] = {
-    # frozen/trainable readout + meanfield width grids ("noiseless" study)
-    "noiseless": "noiseless_Layerless",
-    # halfspace / max / zerobias weight-dissection checkpoints
-    "weight_analysis": "weight_analysis_checkpoints",
-}
-
-def ckpt_dir(study: str) -> str:
-    """checkpoints/<study folder>; created on demand."""
-    d = os.path.join(CHECKPOINT_ROOT, STUDY_DIRS.get(study, study))
-    os.makedirs(d, exist_ok=True)
-    return d
-
 def run_name(prefix: str, *, depth: int, width: int, seed: int = 0,
              **extras) -> str:
     """Canonical run name: <prefix>_d<depth>_w<width>[_k<v>...]_seed<seed>.
@@ -88,8 +101,10 @@ def run_name(prefix: str, *, depth: int, width: int, seed: int = 0,
     parts.append(f"seed{seed}")
     return "_".join(parts)
 
-def ckpt_path(study: str, name: str, tag: str = "final") -> str:
-    return os.path.join(ckpt_dir(study), f"{name}_{tag}.pt")
+def ckpt_path(ckpt_dir: str, name: str, tag: str = "final") -> str:
+    """<ckpt_dir>/<name>_<tag>.pt; the directory is created on demand."""
+    os.makedirs(ckpt_dir, exist_ok=True)
+    return os.path.join(ckpt_dir, f"{name}_{tag}.pt")
 
 _NAME_RE = re.compile(
     r"(?P<prefix>.+?)_d(?P<depth>\d+)_w(?P<width>\d+)(?P<extras>(_[a-z]+\d+)*)"
@@ -108,13 +123,14 @@ def parse_ckpt_name(path: str) -> Optional[dict]:
             d[em.group(1)] = int(em.group(2))
     return d
 
-def list_checkpoints(study: Optional[str] = None, pattern: str = "*.pt") -> List[dict]:
-    """Scan checkpoint folders. ALWAYS call this (or get_or_train) before
+def list_checkpoints(ckpt_dirs, pattern: str = "*.pt") -> List[dict]:
+    """Scan the given checkpoint folder(s) (a path or list of paths -- each
+    notebook owns its own CKPT_DIR). ALWAYS call this (or get_or_train) before
     training: if a run already exists on disk, load it instead of re-training."""
-    dirs = [ckpt_dir(study)] if study else \
-           [os.path.join(CHECKPOINT_ROOT, d) for d in STUDY_DIRS.values()]
+    if isinstance(ckpt_dirs, str):
+        ckpt_dirs = [ckpt_dirs]
     out = []
-    for d in dirs:
+    for d in ckpt_dirs:
         for p in sorted(glob.glob(os.path.join(d, pattern))):
             out.append(parse_ckpt_name(p) or {"path": p})
     return out
@@ -159,12 +175,49 @@ def get_or_train(path: str, build: Callable[[], MLP], task: Task,
         model, payload = MLP.load(path, map_location=map_location)
         return model, payload, True
     ckdir, base = os.path.split(path)
-    name = re.sub(r"_\w+\.pt$", "", base)        # strip the trailing _<tag>.pt
+    name = re.sub(r"_[^_.]+\.pt$", "", base)     # strip ONLY the trailing _<tag>.pt
     model = build()
     trainer = Trainer(model, task, train_cfg, checkpoint_dir=ckdir or ".",
                       run_name=name, extra_meta=extra_meta)
     result = trainer.train(progress=progress)
     return model, result, False
+
+def get_or_train_many(paths: List[str], builds: List[Callable[[], MLP]], task: Task,
+                      train_cfg: TrainConfig, *, extra_meta: Optional[dict] = None,
+                      load_existing: bool = True, map_location="cpu",
+                      progress: bool = True) -> List[Tuple[MLP, dict, bool]]:
+    """`get_or_train` for a batch of same-architecture runs (e.g. all seeds of one
+    width). Existing checkpoints are loaded; ALL missing ones are trained together
+    in ONE vmapped loop (`training.train_many`, ~Nx faster than sequential on GPU)
+    and saved under their own paths. Returns [(model, payload, was_loaded)] in the
+    order of `paths`."""
+    out: List[Optional[Tuple[MLP, dict, bool]]] = [None] * len(paths)
+    missing: List[int] = []
+    for i, path in enumerate(paths):
+        if load_existing and os.path.exists(path):
+            model, payload = MLP.load(path, map_location=map_location)
+            out[i] = (model, payload, True)
+        else:
+            missing.append(i)
+    if missing:
+        ckdirs = {os.path.split(paths[i])[0] or "." for i in missing}
+        names = [re.sub(r"_[^_.]+\.pt$", "", os.path.basename(paths[i])) for i in missing]
+        models = [builds[i]() for i in missing]
+        save_dir = ckdirs.pop() if len(ckdirs) == 1 else None  # mixed dirs: save manually below
+        results = train_many(models, task, train_cfg, run_names=names,
+                             checkpoint_dir=save_dir, extra_meta=extra_meta,
+                             progress=progress)
+        for j, i in enumerate(missing):
+            model, result = results[j]
+            if save_dir is None and train_cfg.checkpoint_mode != "none":
+                from dataclasses import asdict
+                model.save(paths[i], extra={"step": result["steps_run"],
+                                            "history": result["history"],
+                                            "final_loss": result["final_loss"],
+                                            "train_config": asdict(train_cfg),
+                                            **(extra_meta or {})})
+            out[i] = (model, result, False)
+    return out  # type: ignore[return-value]
 
 def final_loss(payload: dict) -> float:
     """Final training loss from either a loaded checkpoint payload or a Trainer

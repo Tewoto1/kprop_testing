@@ -12,9 +12,11 @@ unified ``training`` loop on the chosen task), and writes an incremental CSV +
 
 Key flags: --task {zero,halfspace,distill}, --k-max, --kind, --exact-relu-cov
 (exact bivariate ReLU covariance at k_max==2), --use-avg-metric, --no-factor,
---skip-training, --no-plots, --bias. Everything is float64 (kprop is run in double
-precision). The headline metric is the scale-free relative error |cp-mc|/|mc|; read
-it with mc_noise_z (error in MC-standard-error units).
+--skip-training, --no-plots, --bias, --dtype. The model/training/MC run in float32
+by default (GPU-fast; pass --dtype float64 for the old all-double behaviour); kprop
+itself ALWAYS propagates in float64 internally (the adapter builds a double copy),
+and the MC accumulators are float64. The headline metric is the scale-free relative
+error |cp-mc|/|mc|; read it with mc_noise_z (error in MC-standard-error units).
 """
 from __future__ import annotations
 
@@ -39,9 +41,10 @@ from .metrics import compare_means, estimate_empirical_mean
 
 def _evaluate(model, input_dim, cumulant_config, mc_samples, mc_batch_size, device):
     cp = extract_mean(run_cumulants(model, input_dim, cumulant_config, device=device))
+    model_dtype = next(model.parameters()).dtype   # MC inputs must match the model dtype
     mc, mc_stats = estimate_empirical_mean(model=model, input_dim=input_dim,
                                            num_samples=mc_samples, batch_size=mc_batch_size,
-                                           device=device)
+                                           device=device, dtype=model_dtype)
     return compare_means(cp, mc, mc_stats), cp, mc, mc_stats
 
 
@@ -94,12 +97,17 @@ def main():
                    help="exact bivariate-Gaussian ReLU covariance at k_max==2 (needs scipy)")
 
     p.add_argument("--device", default=("cuda" if torch.cuda.is_available() else "cpu"))
+    p.add_argument("--dtype", default="float32", choices=["float32", "float64"],
+                   help="model/training/MC dtype (kprop is float64 internally either way)")
     p.add_argument("--outdir", default="results/comparison")
     p.add_argument("--skip-training", action="store_true")
     p.add_argument("--no-plots", action="store_true")
     args = p.parse_args()
 
-    torch.set_default_dtype(torch.float64)
+    torch.set_default_dtype(getattr(torch, args.dtype))
+    if args.device == "cuda":          # TF32 matmuls on Ampere+ (fine: errors here >> 1e-3 rel)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     os.makedirs(args.outdir, exist_ok=True)
     csv_path = os.path.join(args.outdir, "comparison_results.csv")
 
@@ -110,7 +118,7 @@ def main():
     out_dim = 1 if args.task == "halfspace" else args.output_dim
 
     with open(os.path.join(args.outdir, "config.json"), "w") as f:
-        json.dump({**vars(args), "cumulant_config": cumulant_config, "dtype": "float64"},
+        json.dump({**vars(args), "cumulant_config": cumulant_config},
                   f, indent=2, default=str)
 
     print(f"cumulant config: {cfg_summary}")
@@ -135,7 +143,8 @@ def main():
                 if phase == "trained":
                     tcfg = TrainConfig(steps=args.train_steps, batch_size=args.batch_size,
                                        lr=args.lr, weight_decay=args.weight_decay, seed=seed,
-                                       checkpoint_mode="none", device=args.device)
+                                       checkpoint_mode="none", device=args.device,
+                                       dtype=args.dtype)
                     train_stats = Trainer(model, task, tcfg, run_name=f"{args.task}_w{width}").train(
                         progress=False)
                 else:

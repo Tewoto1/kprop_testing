@@ -72,8 +72,9 @@ instead of retraining (the rule of this repo):
 import experiments as E
 from tasks import ZeroTask
 
+CKPT_DIR = "checkpoints/noiseless_Layerless"   # each notebook picks its own folder
 model, payload, loaded = E.get_or_train(
-    E.ckpt_path("noiseless", E.run_name("readout-trainable", depth=2, width=64)),
+    E.ckpt_path(CKPT_DIR, E.run_name("readout-trainable", depth=2, width=64)),
     build=lambda: E.build_mlp(64, 2, output_dim=64),
     task=ZeroTask(input_dim=64, output_dim=64),
     train_cfg=E.default_train_cfg(64),
@@ -139,7 +140,9 @@ python -m Mecha_preds.cumulants.run_comparison \
 
 Each notebook is **generated** from the `build_*.py` script next to it (edit the
 script, re-run it — keeps notebooks reproducible and diffable). Builders share
-`colab_notebooks/_nb.py`; experiment knobs come from `experiments.py`.
+`colab_notebooks/_nb.py`. Each notebook defines its **own knobs and its own
+`CKPT_DIR`** in its config cell — probe there in place; `experiments.py` keeps the
+classic defaults plus the naming/recycling machinery.
 
 - **`trained_to_0_cumulants_test/exact_relu_k2_width_scaling_colab.ipynb`** — the
   **baseline** scaling experiment: does the exact ReLU covariance fix cumulant
@@ -155,8 +158,14 @@ script, re-run it — keeps notebooks reproducible and diffable). Builders share
 
 ## Notes
 
-- **float64**: cumulant propagation (and its Monte-Carlo reference) run in double
-  precision; `run_cumulants` builds a float64 copy of the model internally.
+- **Precision**: training/inference run in **float32** (repo policy — GPU tensor
+  cores, fused Adam, TF32 matmuls; `TrainConfig(dtype="float64")` opts out).
+  Accuracy-critical paths stay double: `run_cumulants` builds a float64 copy of the
+  model internally, MC accumulators are float64, analysis eigendecompositions cast
+  to double.
+- **Parallel training**: `training.train_ensemble` / `E.get_or_train_many` train
+  all seeds of one architecture in a single vmapped loop (exactly equivalent to N
+  independent runs, ~N× faster on GPU).
 - Checkpoints store `model_config`, `state_dict`, `step`, `history`, `final_loss`,
   and `train_config`; load with `MLP.load(path)` → `(model, payload)`.
 - The `kprop/` library is vendored from the ARC paper *"Estimating the expected output
