@@ -60,3 +60,64 @@ def W_last(model) -> torch.Tensor:
 def W_first(model) -> torch.Tensor:
     """The first weight matrix (reads mean-0 input -- the control)."""
     return model.hidden_layers[0].weight.detach().cpu()
+
+
+@torch.no_grad()
+def layer_stats(model, n: int = 100_000, batch_size: int = 16_384,
+                dead_thresh: float = 1e-3) -> Dict[int, Dict[str, np.ndarray]]:
+    """One streaming MC pass (x ~ N(0, I)) over ALL hidden layers. Per layer l:
+
+      mu          (width,)  E[post_l]            -- the -mu direction for W_{l+1}
+      active_frac (width,)  P(pre_l > 0)         -- per-unit ReLU pass rate
+      dead_frac   float     fraction of units with active_frac < dead_thresh
+                            (dead units transmit NO gradient: nothing props back)
+      post_rms    float     RMS of post_l        -- how alive the layer's output is
+    """
+    p = next(model.parameters())
+    device, dtype = p.device, p.dtype
+    L = model.cfg.depth
+    mu = {l: None for l in range(L)}
+    act = {l: None for l in range(L)}
+    sq = {l: 0.0 for l in range(L)}
+    done = 0
+    while done < n:
+        b = min(batch_size, n - done)
+        x = torch.randn(b, model.cfg.input_dim, dtype=dtype, device=device)
+        acts = model.activations(x)
+        for l in range(L):
+            post, pre = acts["post"][l], acts["pre"][l]
+            s, a = post.sum(0), (pre > 0).to(dtype).sum(0)
+            mu[l] = s if mu[l] is None else mu[l] + s
+            act[l] = a if act[l] is None else act[l] + a
+            sq[l] += float(post.pow(2).sum())
+        done += b
+    out: Dict[int, Dict[str, np.ndarray]] = {}
+    for l in range(L):
+        af = (act[l] / done).cpu().numpy()
+        out[l] = dict(mu=(mu[l] / done).cpu().numpy(), active_frac=af,
+                      dead_frac=float((af < dead_thresh).mean()),
+                      post_rms=float(np.sqrt(sq[l] / (done * model.cfg.hidden_dim))))
+    return out
+
+
+def grad_flow(model, task, batch_size: int = 4096, n_batches: int = 8) -> Dict[str, float]:
+    """Per-weight-matrix gradient SCALE at the current parameters, averaged over
+    fresh task batches: ||grad W|| / ||W|| (a relative per-step update scale).
+    ~0 means training has stopped moving that layer ("nothing props back")."""
+    p = next(model.parameters())
+    device = p.device
+    was_training = model.training
+    model.train()
+    norms = {name: 0.0 for name, _ in model.named_weights()}
+    for _ in range(n_batches):
+        x, y = task.sample_batch(batch_size, device)
+        x, y = x.to(p.dtype), y.to(p.dtype)
+        model.zero_grad(set_to_none=True)
+        task.loss(model(x), y).backward()
+        for name, W in model.named_weights():
+            if W.grad is not None:
+                norms[name] += float(W.grad.norm()) / (float(W.norm()) + 1e-30)
+    model.zero_grad(set_to_none=True)
+    if not was_training:
+        model.eval()
+    return {k: v / n_batches for k, v in norms.items()}

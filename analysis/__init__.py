@@ -20,6 +20,7 @@ from .Tools import (
 )
 from .Tools.weight_structure import (
     mean_prev_post, weight_structure_metrics, W_last, W_first,
+    layer_stats, grad_flow,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "activation_patch",
     "direct_contributions", "output_lens",
     "mean_prev_post", "weight_structure_metrics", "W_last", "W_first",
+    "layer_stats", "grad_flow",
 ]
